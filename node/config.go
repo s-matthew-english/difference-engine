@@ -27,16 +27,12 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/accounts/keystore"
-	"github.com/ethereum/go-ethereum/accounts/usbwallet"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/p2p/discover"
-	"github.com/ethereum/go-ethereum/p2p/discv5"
 	"github.com/ethereum/go-ethereum/p2p/nat"
-	"github.com/ethereum/go-ethereum/p2p/netutil"
 )
 
 var (
@@ -99,23 +95,8 @@ type Config struct {
 	// or not. Disabling is usually useful for protocol debugging (manual topology).
 	NoDiscovery bool
 
-	// DiscoveryV5 specifies whether the the new topic-discovery based V5 discovery
-	// protocol should be started or not.
-	DiscoveryV5 bool
-
-	// Listener address for the V5 discovery protocol UDP traffic.
-	DiscoveryV5Addr string
-
-	// Restrict communication to white listed IP networks.
-	// The whitelist only applies when non-nil.
-	NetRestrict *netutil.Netlist
-
-	// BootstrapNodes used to establish connectivity with the rest of the network.
+	// Bootstrap nodes used to establish connectivity with the rest of the network.
 	BootstrapNodes []*discover.Node
-
-	// BootstrapNodesV5 used to establish connectivity with the rest of the network
-	// using the V5 discovery protocol.
-	BootstrapNodesV5 []*discv5.Node
 
 	// Network interface address on which the node should listen for inbound peers.
 	ListenAddr string
@@ -177,6 +158,9 @@ type Config struct {
 	// If the module list is empty, all RPC API endpoints designated public will be
 	// exposed.
 	WSModules []string
+
+	//enables node level Permissioning
+	EnableNodePermission bool
 }
 
 // IPCEndpoint resolves an IPC endpoint based on a configured value, taking into
@@ -283,7 +267,7 @@ func (c *Config) name() string {
 	return c.Name
 }
 
-// These resources are resolved differently for "geth" instances.
+// These resources are resolved differently for the "geth" and "geth-testnet" instances.
 var isOldGethResource = map[string]bool{
 	"chaindata":          true,
 	"nodes":              true,
@@ -312,14 +296,7 @@ func (c *Config) resolvePath(path string) string {
 			return oldpath
 		}
 	}
-	return filepath.Join(c.instanceDir(), path)
-}
-
-func (c *Config) instanceDir() string {
-	if c.DataDir == "" {
-		return ""
-	}
-	return filepath.Join(c.DataDir, c.name())
+	return filepath.Join(c.DataDir, c.name(), path)
 }
 
 // NodeKey retrieves the currently configured private key of the node, checking
@@ -402,19 +379,15 @@ func (c *Config) parsePersistentNodes(path string) []*discover.Node {
 	return nodes
 }
 
-func makeAccountManager(conf *Config) (*accounts.Manager, string, error) {
-	scryptN := keystore.StandardScryptN
-	scryptP := keystore.StandardScryptP
+func makeAccountManager(conf *Config) (am *accounts.Manager, ephemeralKeystore string, err error) {
+	scryptN := accounts.StandardScryptN
+	scryptP := accounts.StandardScryptP
 	if conf.UseLightweightKDF {
-		scryptN = keystore.LightScryptN
-		scryptP = keystore.LightScryptP
+		scryptN = accounts.LightScryptN
+		scryptP = accounts.LightScryptP
 	}
 
-	var (
-		keydir    string
-		ephemeral string
-		err       error
-	)
+	var keydir string
 	switch {
 	case filepath.IsAbs(conf.KeyStoreDir):
 		keydir = conf.KeyStoreDir
@@ -429,7 +402,7 @@ func makeAccountManager(conf *Config) (*accounts.Manager, string, error) {
 	default:
 		// There is no datadir.
 		keydir, err = ioutil.TempDir("", "go-ethereum-keystore")
-		ephemeral = keydir
+		ephemeralKeystore = keydir
 	}
 	if err != nil {
 		return nil, "", err
@@ -437,14 +410,6 @@ func makeAccountManager(conf *Config) (*accounts.Manager, string, error) {
 	if err := os.MkdirAll(keydir, 0700); err != nil {
 		return nil, "", err
 	}
-	// Assemble the account manager and supported backends
-	backends := []accounts.Backend{
-		keystore.NewKeyStore(keydir, scryptN, scryptP),
-	}
-	if ledgerhub, err := usbwallet.NewLedgerHub(); err != nil {
-		glog.V(logger.Warn).Infof("Failed to start Ledger hub, disabling: %v", err)
-	} else {
-		backends = append(backends, ledgerhub)
-	}
-	return accounts.NewManager(backends...), ephemeral, nil
+
+	return accounts.NewManager(keydir, scryptN, scryptP), ephemeralKeystore, nil
 }

@@ -31,6 +31,15 @@ func (op OpCode) IsPush() bool {
 	return false
 }
 
+func (op OpCode) isMutating() bool {
+	switch op {
+	case SUICIDE, CREATE, SSTORE, LOG0, LOG1, LOG2, LOG3, LOG4:
+		return true
+	default:
+		return false
+	}
+}
+
 func (op OpCode) IsStaticJump() bool {
 	return op == JUMP
 }
@@ -202,7 +211,7 @@ const (
 	RETURN
 	DELEGATECALL
 
-	SELFDESTRUCT = 0xff
+	SUICIDE = 0xff
 )
 
 // Since the opcodes aren't all in order we can't use a regular slice
@@ -355,7 +364,7 @@ var opCodeToString = map[OpCode]string{
 	RETURN:       "RETURN",
 	CALLCODE:     "CALLCODE",
 	DELEGATECALL: "DELEGATECALL",
-	SELFDESTRUCT: "SELFDESTRUCT",
+	SUICIDE:      "SUICIDE",
 
 	PUSH: "PUSH",
 	DUP:  "DUP",
@@ -501,7 +510,7 @@ var stringToOp = map[string]OpCode{
 	"CALL":         CALL,
 	"RETURN":       RETURN,
 	"CALLCODE":     CALLCODE,
-	"SELFDESTRUCT": SELFDESTRUCT,
+	"SUICIDE":      SUICIDE,
 }
 
 func StringToOp(str string) OpCode {

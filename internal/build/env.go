@@ -20,7 +20,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 )
 
 var (
@@ -89,14 +88,9 @@ func LocalEnv() Environment {
 			env.Branch = b
 		}
 	}
-	if env.Tag == "" {
-		env.Tag = firstLine(RunGit("tag", "-l", "--points-at", "HEAD"))
-	}
+	// Note that we don't get the current git tag. It would slow down
+	// builds and isn't used by anything.
 	return env
-}
-
-func firstLine(s string) string {
-	return strings.Split(s, "\n")[0]
 }
 
 func applyEnvFlags(env Environment) Environment {

@@ -64,12 +64,12 @@ var (
 	maxHeadersProcess = 2048      // Number of header download results to import at once into the chain
 	maxResultsProcess = 2048      // Number of content download results to import at once into the chain
 
-	fsHeaderCheckFrequency = 100        // Verification frequency of the downloaded headers during fast sync
-	fsHeaderSafetyNet      = 2048       // Number of headers to discard in case a chain violation is detected
-	fsHeaderForceVerify    = 24         // Number of headers to verify before and after the pivot to accept it
-	fsPivotInterval        = 256        // Number of headers out of which to randomize the pivot point
-	fsMinFullBlocks        = 64         // Number of blocks to retrieve fully even in fast sync
-	fsCriticalTrials       = uint32(32) // Number of times to retry in the cricical section before bailing
+	fsHeaderCheckFrequency = 100  // Verification frequency of the downloaded headers during fast sync
+	fsHeaderSafetyNet      = 2048 // Number of headers to discard in case a chain violation is detected
+	fsHeaderForceVerify    = 24   // Number of headers to verify before and after the pivot to accept it
+	fsPivotInterval        = 512  // Number of headers out of which to randomize the pivot point
+	fsMinFullBlocks        = 1024 // Number of blocks to retrieve fully even in fast sync
+	fsCriticalTrials       = 10   // Number of times to retry in the cricical section before bailing
 )
 
 var (
@@ -105,7 +105,7 @@ type Downloader struct {
 	peers *peerSet // Set of active peers from which download can proceed
 
 	fsPivotLock  *types.Header // Pivot header on critical section entry (cannot change between retries)
-	fsPivotFails uint32        // Number of subsequent fast sync failures in the critical section
+	fsPivotFails int           // Number of fast sync failures in the critical section
 
 	rttEstimate   uint64 // Round trip time to target for download requests
 	rttConfidence uint64 // Confidence in the estimated RTT (unit: millionths to allow atomic ops)
@@ -164,13 +164,13 @@ type Downloader struct {
 }
 
 // New creates a new downloader to fetch hashes and blocks from remote peers.
-func New(mode SyncMode, stateDb ethdb.Database, mux *event.TypeMux, hasHeader headerCheckFn, hasBlockAndState blockAndStateCheckFn,
+func New(stateDb ethdb.Database, mux *event.TypeMux, hasHeader headerCheckFn, hasBlockAndState blockAndStateCheckFn,
 	getHeader headerRetrievalFn, getBlock blockRetrievalFn, headHeader headHeaderRetrievalFn, headBlock headBlockRetrievalFn,
 	headFastBlock headFastBlockRetrievalFn, commitHeadBlock headBlockCommitterFn, getTd tdRetrievalFn, insertHeaders headerChainInsertFn,
 	insertBlocks blockChainInsertFn, insertReceipts receiptChainInsertFn, rollback chainRollbackFn, dropPeer peerDropFn) *Downloader {
 
 	dl := &Downloader{
-		mode:             mode,
+		mode:             FullSync,
 		mux:              mux,
 		queue:            newQueue(stateDb),
 		peers:            newPeerSet(),
@@ -361,7 +361,7 @@ func (d *Downloader) synchronise(id string, hash common.Hash, td *big.Int, mode 
 
 	// Set the requested sync mode, unless it's forbidden
 	d.mode = mode
-	if d.mode == FastSync && atomic.LoadUint32(&d.fsPivotFails) >= fsCriticalTrials {
+	if d.mode == FastSync && d.fsPivotFails >= fsCriticalTrials {
 		d.mode = FullSync
 	}
 	// Retrieve the origin peer and initiate the downloading process
@@ -480,11 +480,6 @@ func (d *Downloader) spawnSync(origin uint64, fetchers ...func() error) error {
 	d.queue.Close()
 	d.cancel()
 	wg.Wait()
-
-	// If sync failed in the critical section, bump the fail counter
-	if err != nil && d.mode == FastSync && d.fsPivotLock != nil {
-		atomic.AddUint32(&d.fsPivotFails, 1)
-	}
 	return err
 }
 
@@ -931,10 +926,10 @@ func (d *Downloader) fetchNodeData() error {
 	var (
 		deliver = func(packet dataPack) (int, error) {
 			start := time.Now()
-			return d.queue.DeliverNodeData(packet.PeerId(), packet.(*statePack).states, func(delivered int, progressed bool, err error) {
+			return d.queue.DeliverNodeData(packet.PeerId(), packet.(*statePack).states, func(err error, delivered int) {
 				// If the peer returned old-requested data, forgive
 				if err == trie.ErrNotRequested {
-					glog.V(logger.Debug).Infof("peer %s: replied to stale state request, forgiving", packet.PeerId())
+					glog.V(logger.Info).Infof("peer %s: replied to stale state request, forgiving", packet.PeerId())
 					return
 				}
 				if err != nil {
@@ -956,11 +951,6 @@ func (d *Downloader) fetchNodeData() error {
 				syncStatsStateDone := d.syncStatsStateDone // Thread safe copy for the log below
 				d.syncStatsLock.Unlock()
 
-				// If real database progress was made, reset any fast-sync pivot failure
-				if progressed && atomic.LoadUint32(&d.fsPivotFails) > 1 {
-					glog.V(logger.Debug).Infof("fast-sync progressed, resetting fail counter from %d", atomic.LoadUint32(&d.fsPivotFails))
-					atomic.StoreUint32(&d.fsPivotFails, 1) // Don't ever reset to 0, as that will unlock the pivot block
-				}
 				// Log a message to the user and return
 				if delivered > 0 {
 					glog.V(logger.Info).Infof("imported %3d state entries in %9v: processed %d, pending at least %d", delivered, common.PrettyDuration(time.Since(start)), syncStatsStateDone, pending)
@@ -1005,7 +995,7 @@ func (d *Downloader) fetchNodeData() error {
 //  - fetchHook:   tester callback to notify of new tasks being initiated (allows testing the scheduling logic)
 //  - fetch:       network callback to actually send a particular download request to a physical remote peer
 //  - cancel:      task callback to abort an in-flight download request and allow rescheduling it (in case of lost peer)
-//  - capacity:    network callback to retrieve the estimated type-specific bandwidth capacity of a peer (traffic shaping)
+//  - capacity:    network callback to retreive the estimated type-specific bandwidth capacity of a peer (traffic shaping)
 //  - idle:        network callback to retrieve the currently (type specific) idle peers that can be assigned tasks
 //  - setIdle:     network callback to set a peer back to idle and update its estimated capacity (traffic shaping)
 //  - kind:        textual label of the type being downloaded to display in log mesages
@@ -1179,28 +1169,15 @@ func (d *Downloader) processHeaders(origin uint64, td *big.Int) error {
 			for i, header := range rollback {
 				hashes[i] = header.Hash()
 			}
-			lastHeader, lastFastBlock, lastBlock := d.headHeader().Number, common.Big0, common.Big0
-			if d.headFastBlock != nil {
-				lastFastBlock = d.headFastBlock().Number()
-			}
-			if d.headBlock != nil {
-				lastBlock = d.headBlock().Number()
-			}
+			lastHeader, lastFastBlock, lastBlock := d.headHeader().Number, d.headFastBlock().Number(), d.headBlock().Number()
 			d.rollback(hashes)
-			curFastBlock, curBlock := common.Big0, common.Big0
-			if d.headFastBlock != nil {
-				curFastBlock = d.headFastBlock().Number()
-			}
-			if d.headBlock != nil {
-				curBlock = d.headBlock().Number()
-			}
 			glog.V(logger.Warn).Infof("Rolled back %d headers (LH: %d->%d, FB: %d->%d, LB: %d->%d)",
-				len(hashes), lastHeader, d.headHeader().Number, lastFastBlock, curFastBlock, lastBlock, curBlock)
+				len(hashes), lastHeader, d.headHeader().Number, lastFastBlock, d.headFastBlock().Number(), lastBlock, d.headBlock().Number())
 
 			// If we're already past the pivot point, this could be an attack, thread carefully
 			if rollback[len(rollback)-1].Number.Uint64() > pivot {
 				// If we didn't ever fail, lock in te pivot header (must! not! change!)
-				if atomic.LoadUint32(&d.fsPivotFails) == 0 {
+				if d.fsPivotFails == 0 {
 					for _, header := range rollback {
 						if header.Number.Uint64() == pivot {
 							glog.V(logger.Warn).Infof("Fast-sync critical section failure, locked pivot to header #%d [%x…]", pivot, header.Hash().Bytes()[:4])
@@ -1208,6 +1185,7 @@ func (d *Downloader) processHeaders(origin uint64, td *big.Int) error {
 						}
 					}
 				}
+				d.fsPivotFails++
 			}
 		}
 	}()
@@ -1242,10 +1220,8 @@ func (d *Downloader) processHeaders(origin uint64, td *big.Int) error {
 				// L: Sync begins, and finds common ancestor at 11
 				// L: Request new headers up from 11 (R's TD was higher, it must have something)
 				// R: Nothing to give
-				if d.mode != LightSync {
-					if !gotHeaders && td.Cmp(d.getTd(d.headBlock().Hash())) > 0 {
-						return errStallingPeer
-					}
+				if !gotHeaders && td.Cmp(d.getTd(d.headBlock().Hash())) > 0 {
+					return errStallingPeer
 				}
 				// If fast or light syncing, ensure promised headers are indeed delivered. This is
 				// needed to detect scenarios where an attacker feeds a bad pivot and then bails out

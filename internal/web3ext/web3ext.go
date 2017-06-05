@@ -19,16 +19,127 @@ package web3ext
 
 var Modules = map[string]string{
 	"admin":      Admin_JS,
+	"bzz":        Bzz_JS,
 	"chequebook": Chequebook_JS,
 	"debug":      Debug_JS,
+	"ens":        ENS_JS,
 	"eth":        Eth_JS,
+	"raft":       Raft_JS,
 	"miner":      Miner_JS,
 	"net":        Net_JS,
 	"personal":   Personal_JS,
+	"quorum":     Quorum_JS,
 	"rpc":        RPC_JS,
 	"shh":        Shh_JS,
 	"txpool":     TxPool_JS,
 }
+
+const Bzz_JS = `
+web3._extend({
+	property: 'bzz',
+	methods:
+	[
+		new web3._extend.Method({
+			name: 'blockNetworkRead',
+			call: 'bzz_blockNetworkRead',
+			params: 1,
+			inputFormatter: [null]
+		}),
+		new web3._extend.Method({
+			name: 'syncEnabled',
+			call: 'bzz_syncEnabled',
+			params: 1,
+			inputFormatter: [null]
+		}),
+		new web3._extend.Method({
+			name: 'swapEnabled',
+			call: 'bzz_swapEnabled',
+			params: 1,
+			inputFormatter: [null]
+		}),
+		new web3._extend.Method({
+			name: 'download',
+			call: 'bzz_download',
+			params: 2,
+			inputFormatter: [null, null]
+		}),
+		new web3._extend.Method({
+			name: 'upload',
+			call: 'bzz_upload',
+			params: 2,
+			inputFormatter: [null, null]
+		}),
+		new web3._extend.Method({
+			name: 'retrieve',
+			call: 'bzz_retrieve',
+			params: 1,
+			inputFormatter: [null]
+		}),
+		new web3._extend.Method({
+			name: 'store',
+			call: 'bzz_store',
+			params: 2,
+			inputFormatter: [null]
+		}),
+		new web3._extend.Method({
+			name: 'get',
+			call: 'bzz_get',
+			params: 1,
+			inputFormatter: [null]
+		}),
+		new web3._extend.Method({
+			name: 'put',
+			call: 'bzz_put',
+			params: 2,
+			inputFormatter: [null, null]
+		}),
+		new web3._extend.Method({
+			name: 'modify',
+			call: 'bzz_modify',
+			params: 4,
+			inputFormatter: [null, null, null, null]
+		})
+	],
+	properties:
+	[
+		new web3._extend.Property({
+			name: 'hive',
+			getter: 'bzz_hive'
+		}),
+		new web3._extend.Property({
+			name: 'info',
+			getter: 'bzz_info',
+		}),
+	]
+});
+`
+
+const ENS_JS = `
+web3._extend({
+  property: 'ens',
+  methods:
+  [
+    new web3._extend.Method({
+			name: 'register',
+			call: 'ens_register',
+			params: 1,
+			inputFormatter: [null]
+		}),
+	new web3._extend.Method({
+			name: 'setContentHash',
+			call: 'ens_setContentHash',
+			params: 2,
+			inputFormatter: [null, null]
+		}),
+	new web3._extend.Method({
+			name: 'resolve',
+			call: 'ens_resolve',
+			params: 1,
+			inputFormatter: [null]
+		}),
+	]
+})
+`
 
 const Chequebook_JS = `
 web3._extend({
@@ -117,6 +228,41 @@ web3._extend({
 		new web3._extend.Method({
 			name: 'stopWS',
 			call: 'admin_stopWS'
+		}),
+		new web3._extend.Method({
+			name: 'setGlobalRegistrar',
+			call: 'admin_setGlobalRegistrar',
+			params: 2
+		}),
+		new web3._extend.Method({
+			name: 'setHashReg',
+			call: 'admin_setHashReg',
+			params: 2
+		}),
+		new web3._extend.Method({
+			name: 'setUrlHint',
+			call: 'admin_setUrlHint',
+			params: 2
+		}),
+		new web3._extend.Method({
+			name: 'saveInfo',
+			call: 'admin_saveInfo',
+			params: 2
+		}),
+		new web3._extend.Method({
+			name: 'register',
+			call: 'admin_register',
+			params: 3
+		}),
+		new web3._extend.Method({
+			name: 'registerUrl',
+			call: 'admin_registerUrl',
+			params: 3
+		}),
+		new web3._extend.Method({
+			name: 'httpGet',
+			call: 'admin_httpGet',
+			params: 2
 		})
 	],
 	properties:
@@ -288,12 +434,6 @@ web3._extend({
 			call: 'debug_traceTransaction',
 			params: 2,
 			inputFormatter: [null, null]
-		}),
-		new web3._extend.Method({
-			name: 'preimage',
-			call: 'debug_preimage',
-			params: 1,
-			inputFormatter: [null]
 		})
 	],
 	properties: []
@@ -316,6 +456,12 @@ web3._extend({
 			call: 'eth_resend',
 			params: 3,
 			inputFormatter: [web3._extend.formatters.inputTransactionFormatter, web3._extend.utils.fromDecimal, web3._extend.utils.fromDecimal]
+		}),
+		new web3._extend.Method({
+			name: 'getNatSpec',
+			call: 'eth_getNatSpec',
+			params: 1,
+			inputFormatter: [web3._extend.formatters.inputTransactionFormatter]
 		}),
 		new web3._extend.Method({
 			name: 'signTransaction',
@@ -341,6 +487,12 @@ web3._extend({
 			},
 			params: 2,
 			inputFormatter: [web3._extend.formatters.inputBlockNumberFormatter, web3._extend.utils.toHex]
+		}),
+		new web3._extend.Method({
+			name: 'storageRoot',
+			call: 'eth_storageRoot',
+			params: 2,
+			inputFormatter: [web3._extend.formatters.inputAddressFormatter, null]
 		})
 	],
 	properties:
@@ -359,6 +511,22 @@ web3._extend({
 		})
 	]
 });
+`
+
+const Raft_JS = `
+web3._extend({
+       property: 'raft',
+       methods:
+       [
+       ],
+       properties:
+       [
+               new web3._extend.Property({
+                       name: 'role',
+                       getter: 'raft_role'
+               })
+       ]
+})
 `
 
 const Miner_JS = `
@@ -439,6 +607,12 @@ web3._extend({
 			params: 2
 		}),
 		new web3._extend.Method({
+			name: 'sendTransaction',
+			call: 'personal_sendTransaction',
+			params: 2,
+			inputFormatter: [web3._extend.formatters.inputTransactionFormatter, null]
+		}),
+		new web3._extend.Method({
 			name: 'sign',
 			call: 'personal_sign',
 			params: 3,
@@ -448,18 +622,6 @@ web3._extend({
 			name: 'ecRecover',
 			call: 'personal_ecRecover',
 			params: 2
-		}),
-		new web3._extend.Method({
-			name: 'deriveAccount',
-			call: 'personal_deriveAccount',
-			params: 3
-		})
-	],
-	properties:
-	[
-		new web3._extend.Property({
-			name: 'listWallets',
-			getter: 'personal_listWallets'
 		})
 	]
 })
@@ -520,3 +682,120 @@ web3._extend({
 	]
 });
 `
+
+const Quorum_JS = `
+web3._extend({
+	property: 'quorum',
+	methods: [
+		new web3._extend.Method({
+			name: 'canonicalHash',
+			call: 'quorum_canonicalHash',
+			params: 1,
+			inputFormatter: [null]
+		}),
+		new web3._extend.Method({
+			name: 'vote',
+			call: 'quorum_vote',
+			params: 1
+		}),
+		new web3._extend.Method({
+			name: 'makeBlock',
+			call: 'quorum_makeBlock'
+		}),
+		new web3._extend.Method({
+			name: 'isVoter',
+			call: 'quorum_isVoter',
+			params: 1,
+			inputFormatter: [web3._extend.formatters.inputAddressFormatter]
+		}),
+		new web3._extend.Method({
+			name: 'isBlockMaker',
+			call: 'quorum_isBlockMaker',
+			params: 1,
+			inputFormatter: [web3._extend.formatters.inputAddressFormatter]
+		}),
+		new web3._extend.Method({
+			name: 'pauseBlockMaker',
+			call: 'quorum_pauseBlockMaker'
+		}),
+		new web3._extend.Method({
+			name: 'resumeBlockMaker',
+			call: 'quorum_resumeBlockMaker'
+		})
+	],
+	properties:
+	[
+		new web3._extend.Property({
+			name: 'nodeInfo',
+			getter: 'quorum_nodeInfo'
+		}),
+	]
+});
+`
+
+/*
+const Voting_JS = `
+web3._extend({
+	property: 'voting',
+	methods: [
+		new web3._extend.Method({
+			name: 'startVoting',
+			call: 'voting_startVoting'
+		}),
+		new web3._extend.Method({
+			name: 'stopVoting',
+			call: 'voting_stopVoting'
+		}),
+		new web3._extend.Method({
+			name: 'addVoter',
+			call: 'voting_addVoter',
+			params: 1,
+			inputFormatter: [web3._extend.formatters.inputAddressFormatter]
+		}),
+		new web3._extend.Method({
+			name: 'removeVoter',
+			call: 'voting_removeVoter',
+			params: 1,
+			inputFormatter: [web3._extend.formatters.inputAddressFormatter]
+		}),
+		new web3._extend.Method({
+			name: 'startBlockMaker',
+			call: 'voting_startBlockMaker'
+		}),
+		new web3._extend.Method({
+			name: 'stopBlockMaker',
+			call: 'voting_stopBlockMaker'
+		}),
+		new web3._extend.Method({
+			name: 'addBlockMaker',
+			call: 'voting_addBlockMaker',
+			params: 1,
+			iinputFormatter: [web3._extend.formatters.inputAddressFormatter]
+		}),
+		new web3._extend.Method({
+			name: 'removeBlockMaker',
+			call: 'voting_removeBlockMaker',
+			params: 1,
+			iinputFormatter: [web3._extend.formatters.inputAddressFormatter]
+		}),
+		new web3._extend.Method({
+			name: 'getEntry',
+			call: 'voting_getEntry',
+			params: 2
+		})
+	],
+	properties:
+	[
+		new web3._extend.Property({
+			name: 'period',
+			getter: 'voting_period'
+		}),
+		new web3._extend.Property({
+			name: 'voterCount',
+			getter: 'voting_voterCount'
+		}),
+
+	]
+});
+`
+*/

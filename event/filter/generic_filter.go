@@ -34,7 +34,7 @@ func (self Generic) Compare(f Filter) bool {
 		strMatch = false
 	}
 
-	for k := range self.Data {
+	for k, _ := range self.Data {
 		if _, ok := filter.Data[k]; !ok {
 			return false
 		}

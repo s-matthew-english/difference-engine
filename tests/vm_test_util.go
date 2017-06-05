@@ -26,7 +26,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/logger/glog"
@@ -129,9 +128,9 @@ func runVmTests(tests map[string]VmTest, skipTests []string) error {
 	}
 
 	for name, test := range tests {
-		if skipTest[name] /*|| name != "loop_stacklimit_1021"*/ {
+		if skipTest[name] {
 			glog.Infoln("Skipping VM test", name)
-			continue
+			return nil
 		}
 
 		if err := runVmTest(test); err != nil {
@@ -165,20 +164,20 @@ func runVmTest(test VmTest) error {
 		ret  []byte
 		gas  *big.Int
 		err  error
-		logs []*types.Log
+		logs vm.Logs
 	)
 
 	ret, logs, gas, err = RunVm(statedb, env, test.Exec)
 
 	// Compare expected and actual return
 	rexp := common.FromHex(test.Out)
-	if !bytes.Equal(rexp, ret) {
+	if bytes.Compare(rexp, ret) != 0 {
 		return fmt.Errorf("return failed. Expected %x, got %x\n", rexp, ret)
 	}
 
 	// Check gas usage
 	if len(test.Gas) == 0 && err == nil {
-		return fmt.Errorf("gas unspecified, indicating an error. VM returned (incorrectly) successful")
+		return fmt.Errorf("gas unspecified, indicating an error. VM returned (incorrectly) successfull")
 	} else {
 		gexp := common.Big(test.Gas)
 		if gexp.Cmp(gas) != 0 {
@@ -212,23 +211,25 @@ func runVmTest(test VmTest) error {
 	return nil
 }
 
-func RunVm(statedb *state.StateDB, env, exec map[string]string) ([]byte, []*types.Log, *big.Int, error) {
-	chainConfig := &params.ChainConfig{
-		HomesteadBlock: params.MainNetHomesteadBlock,
-		DAOForkBlock:   params.MainNetDAOForkBlock,
-		DAOForkSupport: true,
-	}
+func RunVm(state *state.StateDB, env, exec map[string]string) ([]byte, vm.Logs, *big.Int, error) {
 	var (
 		to    = common.HexToAddress(exec["address"])
 		from  = common.HexToAddress(exec["caller"])
 		data  = common.FromHex(exec["data"])
 		gas   = common.Big(exec["gas"])
+		price = common.Big(exec["gasPrice"])
 		value = common.Big(exec["value"])
 	)
-	caller := statedb.GetOrNewStateObject(from)
-	vm.PrecompiledContracts = make(map[common.Address]vm.PrecompiledContract)
+	// Reset the pre-compiled contracts for VM tests.
+	vm.Precompiled = make(map[string]*vm.PrecompiledAccount)
 
-	environment, _ := NewEVMEnvironment(true, chainConfig, statedb, env, exec)
-	ret, err := environment.Call(caller, to, data, gas, value)
-	return ret, statedb.Logs(), gas, err
+	caller := state.GetOrNewStateObject(from)
+
+	vmenv := NewEnvFromMap(RuleSet{params.MainNetHomesteadBlock, params.MainNetDAOForkBlock, true, nil}, state, env, exec)
+	vmenv.vmTest = true
+	vmenv.skipTransfer = true
+	vmenv.initial = true
+	ret, err := vmenv.Call(caller, to, data, gas, price, value)
+
+	return ret, vmenv.state.Logs(), vmenv.Gas, err
 }

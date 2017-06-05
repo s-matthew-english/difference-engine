@@ -429,7 +429,7 @@ func (msg *authMsgV4) decodePlain(input []byte) {
 	n := copy(msg.Signature[:], input)
 	n += shaLen // skip sha3(initiator-ephemeral-pubk)
 	n += copy(msg.InitiatorPubkey[:], input[n:])
-	copy(msg.Nonce[:], input[n:])
+	n += copy(msg.Nonce[:], input[n:])
 	msg.Version = 4
 	msg.gotPlain = true
 }
@@ -437,13 +437,13 @@ func (msg *authMsgV4) decodePlain(input []byte) {
 func (msg *authRespV4) sealPlain(hs *encHandshake) ([]byte, error) {
 	buf := make([]byte, authRespLen)
 	n := copy(buf, msg.RandomPubkey[:])
-	copy(buf[n:], msg.Nonce[:])
+	n += copy(buf[n:], msg.Nonce[:])
 	return ecies.Encrypt(rand.Reader, hs.remotePub, buf, nil, nil)
 }
 
 func (msg *authRespV4) decodePlain(input []byte) {
 	n := copy(msg.RandomPubkey[:], input)
-	copy(msg.Nonce[:], input[n:])
+	n += copy(msg.Nonce[:], input[n:])
 	msg.Version = 4
 }
 

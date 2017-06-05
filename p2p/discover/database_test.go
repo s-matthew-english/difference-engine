@@ -242,12 +242,12 @@ func TestNodeDBSeedQuery(t *testing.T) {
 	if len(seeds) != len(want) {
 		t.Errorf("seed count mismatch: have %v, want %v", len(seeds), len(want))
 	}
-	for id := range have {
+	for id, _ := range have {
 		if _, ok := want[id]; !ok {
 			t.Errorf("extra seed: %v", id)
 		}
 	}
-	for id := range want {
+	for id, _ := range want {
 		if _, ok := have[id]; !ok {
 			t.Errorf("missing seed: %v", id)
 		}

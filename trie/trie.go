@@ -60,12 +60,8 @@ func init() {
 
 // Database must be implemented by backing stores for the trie.
 type Database interface {
-	DatabaseReader
 	DatabaseWriter
-}
-
-// DatabaseReader wraps the Get method of a backing store for the trie.
-type DatabaseReader interface {
+	// Get returns the value for key from the database.
 	Get(key []byte) (value []byte, err error)
 }
 

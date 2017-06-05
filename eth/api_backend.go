@@ -1,24 +1,25 @@
 // Copyright 2015 The go-ethereum Authors
-// This file is part of the go-ethereum library.
+// This file is part of go-ethereum.
 //
-// The go-ethereum library is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Lesser General Public License as published by
+// go-ethereum is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
 // the Free Software Foundation, either version 3 of the License, or
 // (at your option) any later version.
 //
-// The go-ethereum library is distributed in the hope that it will be useful,
+// go-ethereum is distributed in the hope that it will be useful,
 // but WITHOUT ANY WARRANTY; without even the implied warranty of
 // MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-// GNU Lesser General Public License for more details.
+// GNU General Public License for more details.
 //
-// You should have received a copy of the GNU Lesser General Public License
-// along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
+// You should have received a copy of the GNU General Public License
+// along with go-ethereum. If not, see <http://www.gnu.org/licenses/>.
 
 package eth
 
 import (
 	"math/big"
 
+	"fmt"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
@@ -26,50 +27,44 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/downloader"
-	"github.com/ethereum/go-ethereum/eth/gasprice"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
-	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/rpc"
+	rpc "github.com/ethereum/go-ethereum/rpc"
 	"golang.org/x/net/context"
 )
+
+var raftHasNoPending = fmt.Errorf("Raft mode has no Pending block. Use latest instead.")
 
 // EthApiBackend implements ethapi.Backend for full nodes
 type EthApiBackend struct {
 	eth *Ethereum
-	gpo *gasprice.GasPriceOracle
-}
-
-func (b *EthApiBackend) ChainConfig() *params.ChainConfig {
-	return b.eth.chainConfig
-}
-
-func (b *EthApiBackend) CurrentBlock() *types.Block {
-	return b.eth.blockchain.CurrentBlock()
 }
 
 func (b *EthApiBackend) SetHead(number uint64) {
 	b.eth.blockchain.SetHead(number)
 }
 
-func (b *EthApiBackend) HeaderByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*types.Header, error) {
+func (b *EthApiBackend) HeaderByNumber(blockNr rpc.BlockNumber) *types.Header {
 	// Pending block is only known by the miner
 	if blockNr == rpc.PendingBlockNumber {
-		block := b.eth.miner.PendingBlock()
-		return block.Header(), nil
+		block, _, _ := b.eth.blockVoting.Pending()
+		return block.Header()
 	}
 	// Otherwise resolve and return the block
 	if blockNr == rpc.LatestBlockNumber {
-		return b.eth.blockchain.CurrentBlock().Header(), nil
+		return b.eth.blockchain.CurrentBlock().Header()
 	}
-	return b.eth.blockchain.GetHeaderByNumber(uint64(blockNr)), nil
+	return b.eth.blockchain.GetHeaderByNumber(uint64(blockNr))
 }
 
 func (b *EthApiBackend) BlockByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*types.Block, error) {
 	// Pending block is only known by the miner
 	if blockNr == rpc.PendingBlockNumber {
-		block := b.eth.miner.PendingBlock()
+		if b.eth.protocolManager.raftMode {
+			return nil, raftHasNoPending
+		}
+		block, _, _ := b.eth.blockVoting.Pending()
 		return block, nil
 	}
 	// Otherwise resolve and return the block
@@ -79,19 +74,22 @@ func (b *EthApiBackend) BlockByNumber(ctx context.Context, blockNr rpc.BlockNumb
 	return b.eth.blockchain.GetBlockByNumber(uint64(blockNr)), nil
 }
 
-func (b *EthApiBackend) StateAndHeaderByNumber(ctx context.Context, blockNr rpc.BlockNumber) (ethapi.State, *types.Header, error) {
+func (b *EthApiBackend) StateAndHeaderByNumber(blockNr rpc.BlockNumber) (ethapi.State, *types.Header, error) {
 	// Pending state is only known by the miner
 	if blockNr == rpc.PendingBlockNumber {
-		block, state := b.eth.miner.Pending()
-		return EthApiState{state}, block.Header(), nil
+		if b.eth.protocolManager.raftMode {
+			return nil, nil, raftHasNoPending
+		}
+		block, publicState, privateState := b.eth.blockVoting.Pending()
+		return EthApiState{publicState, privateState}, block.Header(), nil
 	}
 	// Otherwise resolve the block number and return its state
-	header, err := b.HeaderByNumber(ctx, blockNr)
-	if header == nil || err != nil {
-		return nil, nil, err
+	header := b.HeaderByNumber(blockNr)
+	if header == nil {
+		return nil, nil, nil
 	}
-	stateDb, err := b.eth.BlockChain().StateAt(header.Root)
-	return EthApiState{stateDb}, header, err
+	publicState, privateState, err := b.eth.BlockChain().StateAt(header.Root)
+	return EthApiState{publicState, privateState}, header, err
 }
 
 func (b *EthApiBackend) GetBlock(ctx context.Context, blockHash common.Hash) (*types.Block, error) {
@@ -106,14 +104,22 @@ func (b *EthApiBackend) GetTd(blockHash common.Hash) *big.Int {
 	return b.eth.blockchain.GetTdByHash(blockHash)
 }
 
-func (b *EthApiBackend) GetVMEnv(ctx context.Context, msg core.Message, state ethapi.State, header *types.Header) (*vm.EVM, func() error, error) {
-	statedb := state.(EthApiState).state
-	from := statedb.GetOrNewStateObject(msg.From())
+func (b *EthApiBackend) GetVMEnv(ctx context.Context, msg core.Message, state ethapi.State, header *types.Header) (vm.Environment, func() error, error) {
+	var (
+		statedb      = state.(EthApiState)
+		publicState  = statedb.publicState
+		privateState = statedb.privateState
+	)
+
+	if msg.To() != nil && !privateState.Exist(*msg.To()) {
+		privateState = publicState
+	}
+
+	addr, _ := msg.From()
+	from := privateState.GetOrNewStateObject(addr)
 	from.SetBalance(common.MaxBig)
 	vmError := func() error { return nil }
-
-	context := core.NewEVMContext(msg, header, b.eth.BlockChain())
-	return vm.NewEVM(context, statedb, b.eth.chainConfig, vm.Config{}), vmError, nil
+	return core.NewEnv(publicState, privateState, b.eth.chainConfig, b.eth.blockchain, msg, header, b.eth.chainConfig.VmConfig), vmError, nil
 }
 
 func (b *EthApiBackend) SendTx(ctx context.Context, signedTx *types.Transaction) error {
@@ -131,20 +137,15 @@ func (b *EthApiBackend) RemoveTx(txHash common.Hash) {
 	b.eth.txPool.Remove(txHash)
 }
 
-func (b *EthApiBackend) GetPoolTransactions() (types.Transactions, error) {
+func (b *EthApiBackend) GetPoolTransactions() types.Transactions {
 	b.eth.txMu.Lock()
 	defer b.eth.txMu.Unlock()
 
-	pending, err := b.eth.txPool.Pending()
-	if err != nil {
-		return nil, err
-	}
-
 	var txs types.Transactions
-	for _, batch := range pending {
+	for _, batch := range b.eth.txPool.Pending() {
 		txs = append(txs, batch...)
 	}
-	return txs, nil
+	return txs
 }
 
 func (b *EthApiBackend) GetPoolTransaction(hash common.Hash) *types.Transaction {
@@ -184,7 +185,7 @@ func (b *EthApiBackend) ProtocolVersion() int {
 }
 
 func (b *EthApiBackend) SuggestPrice(ctx context.Context) (*big.Int, error) {
-	return b.gpo.SuggestPrice(), nil
+	return big.NewInt(0), nil
 }
 
 func (b *EthApiBackend) ChainDb() ethdb.Database {
@@ -200,21 +201,33 @@ func (b *EthApiBackend) AccountManager() *accounts.Manager {
 }
 
 type EthApiState struct {
-	state *state.StateDB
+	publicState, privateState *state.StateDB
 }
 
 func (s EthApiState) GetBalance(ctx context.Context, addr common.Address) (*big.Int, error) {
-	return s.state.GetBalance(addr), nil
+	if s.publicState.Exist(addr) {
+		return s.publicState.GetBalance(addr), nil
+	}
+	return s.privateState.GetBalance(addr), nil
 }
 
 func (s EthApiState) GetCode(ctx context.Context, addr common.Address) ([]byte, error) {
-	return s.state.GetCode(addr), nil
+	if s.publicState.Exist(addr) {
+		return s.publicState.GetCode(addr), nil
+	}
+	return s.privateState.GetCode(addr), nil
 }
 
 func (s EthApiState) GetState(ctx context.Context, a common.Address, b common.Hash) (common.Hash, error) {
-	return s.state.GetState(a, b), nil
+	if s.publicState.Exist(a) {
+		return s.publicState.GetState(a, b), nil
+	}
+	return s.privateState.GetState(a, b), nil
 }
 
 func (s EthApiState) GetNonce(ctx context.Context, addr common.Address) (uint64, error) {
-	return s.state.GetNonce(addr), nil
+	if s.publicState.Exist(addr) {
+		return s.publicState.GetNonce(addr), nil
+	}
+	return s.privateState.GetNonce(addr), nil
 }

@@ -1,4 +1,4 @@
-// Copyright 2015 The go-ethereum Authors
+// Copyright 2016 The go-ethereum Authors
 // This file is part of the go-ethereum library.
 //
 // The go-ethereum library is free software: you can redistribute it and/or modify
@@ -27,8 +27,6 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/eth"
-	"github.com/ethereum/go-ethereum/internal/ethapi"
-	"github.com/ethereum/go-ethereum/les"
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/node"
@@ -62,20 +60,12 @@ type ReleaseService struct {
 // releases and notify the user of such.
 func NewReleaseService(ctx *node.ServiceContext, config Config) (node.Service, error) {
 	// Retrieve the Ethereum service dependency to access the blockchain
-	var apiBackend ethapi.Backend
 	var ethereum *eth.Ethereum
-	if err := ctx.Service(&ethereum); err == nil {
-		apiBackend = ethereum.ApiBackend
-	} else {
-		var ethereum *les.LightEthereum
-		if err := ctx.Service(&ethereum); err == nil {
-			apiBackend = ethereum.ApiBackend
-		} else {
-			return nil, err
-		}
+	if err := ctx.Service(&ethereum); err != nil {
+		return nil, err
 	}
 	// Construct the release service
-	contract, err := NewReleaseOracle(config.Oracle, eth.NewContractBackend(apiBackend))
+	contract, err := NewReleaseOracle(config.Oracle, eth.NewContractBackend(ethereum))
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +131,7 @@ func (r *ReleaseService) checker() {
 
 				warning := fmt.Sprintf("Client v%d.%d.%d-%x seems older than the latest upstream release v%d.%d.%d-%x",
 					r.config.Major, r.config.Minor, r.config.Patch, r.config.Commit[:4], version.Major, version.Minor, version.Patch, version.Commit[:4])
-				howtofix := fmt.Sprintf("Please check https://github.com/ethereum/go-ethereum/releases for new releases")
+				howtofix := fmt.Sprintf("Please check https://github.com/jpmorganchase/quorum/releases for new releases")
 				separator := strings.Repeat("-", len(warning))
 
 				glog.V(logger.Warn).Info(separator)

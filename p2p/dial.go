@@ -19,7 +19,6 @@ package p2p
 import (
 	"container/heap"
 	"crypto/rand"
-	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -27,7 +26,6 @@ import (
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/p2p/discover"
-	"github.com/ethereum/go-ethereum/p2p/netutil"
 )
 
 const (
@@ -50,7 +48,6 @@ const (
 type dialstate struct {
 	maxDynDials int
 	ntab        discoverTable
-	netrestrict *netutil.Netlist
 
 	lookupRunning bool
 	dialing       map[discover.NodeID]connFlag
@@ -103,11 +100,10 @@ type waitExpireTask struct {
 	time.Duration
 }
 
-func newDialState(static []*discover.Node, ntab discoverTable, maxdyn int, netrestrict *netutil.Netlist) *dialstate {
+func newDialState(static []*discover.Node, ntab discoverTable, maxdyn int) *dialstate {
 	s := &dialstate{
 		maxDynDials: maxdyn,
 		ntab:        ntab,
-		netrestrict: netrestrict,
 		static:      make(map[discover.NodeID]*dialTask),
 		dialing:     make(map[discover.NodeID]connFlag),
 		randomNodes: make([]*discover.Node, maxdyn/2),
@@ -132,9 +128,12 @@ func (s *dialstate) removeStatic(n *discover.Node) {
 
 func (s *dialstate) newTasks(nRunning int, peers map[discover.NodeID]*Peer, now time.Time) []task {
 	var newtasks []task
+	isDialing := func(id discover.NodeID) bool {
+		_, found := s.dialing[id]
+		return found || peers[id] != nil || s.hist.contains(id)
+	}
 	addDial := func(flag connFlag, n *discover.Node) bool {
-		if err := s.checkDial(n, peers); err != nil {
-			glog.V(logger.Debug).Infof("skipping dial candidate %x@%v:%d: %v", n.ID[:8], n.IP, n.TCP, err)
+		if isDialing(n.ID) {
 			return false
 		}
 		s.dialing[n.ID] = flag
@@ -160,12 +159,7 @@ func (s *dialstate) newTasks(nRunning int, peers map[discover.NodeID]*Peer, now 
 
 	// Create dials for static nodes if they are not connected.
 	for id, t := range s.static {
-		err := s.checkDial(t.dest, peers)
-		switch err {
-		case errNotWhitelisted, errSelf:
-			glog.V(logger.Debug).Infof("removing static dial candidate %x@%v:%d: %v", t.dest.ID[:8], t.dest.IP, t.dest.TCP, err)
-			delete(s.static, t.dest.ID)
-		case nil:
+		if !isDialing(id) {
 			s.dialing[id] = t.flags
 			newtasks = append(newtasks, t)
 		}
@@ -206,31 +200,6 @@ func (s *dialstate) newTasks(nRunning int, peers map[discover.NodeID]*Peer, now 
 		newtasks = append(newtasks, t)
 	}
 	return newtasks
-}
-
-var (
-	errSelf             = errors.New("is self")
-	errAlreadyDialing   = errors.New("already dialing")
-	errAlreadyConnected = errors.New("already connected")
-	errRecentlyDialed   = errors.New("recently dialed")
-	errNotWhitelisted   = errors.New("not contained in netrestrict whitelist")
-)
-
-func (s *dialstate) checkDial(n *discover.Node, peers map[discover.NodeID]*Peer) error {
-	_, dialing := s.dialing[n.ID]
-	switch {
-	case dialing:
-		return errAlreadyDialing
-	case peers[n.ID] != nil:
-		return errAlreadyConnected
-	case s.ntab != nil && n.ID == s.ntab.Self().ID:
-		return errSelf
-	case s.netrestrict != nil && !s.netrestrict.Contains(n.IP):
-		return errNotWhitelisted
-	case s.hist.contains(n.ID):
-		return errRecentlyDialed
-	}
-	return nil
 }
 
 func (s *dialstate) taskDone(t task, now time.Time) {

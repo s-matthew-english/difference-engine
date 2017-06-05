@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/private"
 )
 
 var (
@@ -55,15 +56,15 @@ type StateTransition struct {
 	initialGas    *big.Int
 	value         *big.Int
 	data          []byte
-	state         vm.StateDB
+	state         vm.Database
 
-	env *vm.EVM
+	env vm.Environment
 }
 
 // Message represents a message sent to a contract.
 type Message interface {
-	From() common.Address
-	//FromFrontier() (common.Address, error)
+	From() (common.Address, error)
+	FromFrontier() (common.Address, error)
 	To() *common.Address
 
 	GasPrice() *big.Int
@@ -73,6 +74,12 @@ type Message interface {
 	Nonce() uint64
 	CheckNonce() bool
 	Data() []byte
+}
+
+// PrivateMessage implements a private message
+type PrivateMessage interface {
+	Message
+	IsPrivate() bool
 }
 
 func MessageCreatesContract(msg Message) bool {
@@ -106,8 +113,8 @@ func IntrinsicGas(data []byte, contractCreation, homestead bool) *big.Int {
 }
 
 // NewStateTransition initialises and returns a new state transition object.
-func NewStateTransition(env *vm.EVM, msg Message, gp *GasPool) *StateTransition {
-	return &StateTransition{
+func NewStateTransition(env vm.Environment, msg Message, gp *GasPool) *StateTransition {
+	st := &StateTransition{
 		gp:         gp,
 		env:        env,
 		msg:        msg,
@@ -116,8 +123,12 @@ func NewStateTransition(env *vm.EVM, msg Message, gp *GasPool) *StateTransition 
 		initialGas: new(big.Int),
 		value:      msg.Value(),
 		data:       msg.Data(),
-		state:      env.StateDB,
+		state:      env.Db(),
 	}
+	if env, ok := env.(DualStateEnv); ok {
+		st.state = env.PublicState()
+	}
+	return st
 }
 
 // ApplyMessage computes the new state by applying the given message
@@ -127,39 +138,35 @@ func NewStateTransition(env *vm.EVM, msg Message, gp *GasPool) *StateTransition 
 // the gas used (which includes gas refunds) and an error if it failed. An error always
 // indicates a core error meaning that the message would always fail for that particular
 // state and would never be accepted within a block.
-func ApplyMessage(env *vm.EVM, msg Message, gp *GasPool) ([]byte, *big.Int, error) {
+func ApplyMessage(env vm.Environment, msg Message, gp *GasPool) ([]byte, *big.Int, error) {
 	st := NewStateTransition(env, msg, gp)
 
 	ret, _, gasUsed, err := st.TransitionDb()
 	return ret, gasUsed, err
 }
 
-func (self *StateTransition) from() vm.Account {
-	f := self.msg.From()
+func (self *StateTransition) from() (vm.Account, error) {
+	var (
+		f   common.Address
+		err error
+	)
+	if self.env.RuleSet().IsHomestead(self.env.BlockNumber()) {
+		f, err = self.msg.From()
+	} else {
+		f, err = self.msg.FromFrontier()
+	}
+	if err != nil {
+		return nil, err
+	}
 	if !self.state.Exist(f) {
-		return self.state.CreateAccount(f)
+		return self.state.CreateAccount(f), nil
 	}
-	return self.state.GetAccount(f)
-}
-
-func (self *StateTransition) to() vm.Account {
-	if self.msg == nil {
-		return nil
-	}
-	to := self.msg.To()
-	if to == nil {
-		return nil // contract creation
-	}
-
-	if !self.state.Exist(*to) {
-		return self.state.CreateAccount(*to)
-	}
-	return self.state.GetAccount(*to)
+	return self.state.GetAccount(f), nil
 }
 
 func (self *StateTransition) useGas(amount *big.Int) error {
 	if self.gas.Cmp(amount) < 0 {
-		return vm.ErrOutOfGas
+		return vm.OutOfGasError
 	}
 	self.gas.Sub(self.gas, amount)
 
@@ -174,11 +181,14 @@ func (self *StateTransition) buyGas() error {
 	mgas := self.msg.Gas()
 	mgval := new(big.Int).Mul(mgas, self.gasPrice)
 
-	sender := self.from()
+	sender, err := self.from()
+	if err != nil {
+		return err
+	}
 	if sender.Balance().Cmp(mgval) < 0 {
 		return fmt.Errorf("insufficient ETH for gas (%x). Req %v, has %v", sender.Address().Bytes()[:4], mgval, sender.Balance())
 	}
-	if err := self.gp.SubGas(mgas); err != nil {
+	if err = self.gp.SubGas(mgas); err != nil {
 		return err
 	}
 	self.addGas(mgas)
@@ -189,7 +199,10 @@ func (self *StateTransition) buyGas() error {
 
 func (self *StateTransition) preCheck() (err error) {
 	msg := self.msg
-	sender := self.from()
+	sender, err := self.from()
+	if err != nil {
+		return err
+	}
 
 	// Make sure this transaction's nonce is correct
 	if msg.CheckNonce() {
@@ -214,52 +227,88 @@ func (self *StateTransition) TransitionDb() (ret []byte, requiredGas, usedGas *b
 	if err = self.preCheck(); err != nil {
 		return
 	}
-	msg := self.msg
-	sender := self.from() // err checked in preCheck
+	var (
+		msg              = self.msg
+		sender, _        = self.from() // err checked in preCheck
+		contractCreation = MessageCreatesContract(msg)
+		vmenv            = self.env
+		publicState      = self.state
+		data             []byte
+		isPrivate        bool
+	)
+	if msg, ok := msg.(PrivateMessage); ok && msg.IsPrivate() {
+		isPrivate = true
+		data, err = private.P.Receive(self.data)
+		// Increment the public account nonce if:
+		// 1. Tx is private and *not* a participant of the group and either call or create
+		// 2. Tx is private we are part of the group and is a call
+		if err != nil || !contractCreation {
+			publicState.SetNonce(sender.Address(), publicState.GetNonce(sender.Address())+1)
+		}
 
-	homestead := self.env.ChainConfig().IsHomestead(self.env.BlockNumber)
-	contractCreation := MessageCreatesContract(msg)
+		if err != nil {
+			glog.V(logger.Debug).Infof("Ignoring private tx")
+			return nil, new(big.Int), new(big.Int), nil
+		}
+	} else {
+		data = self.data
+	}
+
+	homestead := self.env.RuleSet().IsHomestead(self.env.BlockNumber())
 	// Pay intrinsic gas
-	if err = self.useGas(IntrinsicGas(self.data, contractCreation, homestead)); err != nil {
+	if err = self.useGas(IntrinsicGas(data, contractCreation, homestead)); err != nil {
 		return nil, nil, nil, InvalidTxError(err)
 	}
 
-	var (
-		vmenv = self.env
-		// vm errors do not effect consensus and are therefor
-		// not assigned to err, except for insufficient balance
-		// error.
-		vmerr error
-	)
+	//var addr common.Address
 	if contractCreation {
-		ret, _, vmerr = vmenv.Create(sender, self.data, self.gas, self.value)
-	} else {
-		// Increment the nonce for the next transaction
-		self.state.SetNonce(sender.Address(), self.state.GetNonce(sender.Address())+1)
-		ret, vmerr = vmenv.Call(sender, self.to().Address(), self.data, self.gas, self.value)
-	}
-	if vmerr != nil {
-		glog.V(logger.Core).Infoln("vm returned with error:", err)
-		// The only possible consensus-error would be if there wasn't
-		// sufficient balance to make the transfer happen. The first
-		// balance transfer may never fail.
-		if vmerr == vm.ErrInsufficientBalance {
-			return nil, nil, nil, InvalidTxError(vmerr)
+		ret, _, err = vmenv.Create(sender, data, self.gas, self.gasPrice, self.value)
+		if homestead && err == vm.CodeStoreOutOfGasError {
+			self.gas = Big0
 		}
+
+		if err != nil {
+			ret = nil
+			glog.V(logger.Core).Infoln("VM create err:", err)
+		}
+	} else {
+		// Increment the account nonce only if the transaction isn't private.
+		// If the transaction is private it has already been incremented on
+		// the public state.
+		if !isPrivate {
+			publicState.SetNonce(sender.Address(), publicState.GetNonce(sender.Address())+1)
+		}
+
+		ret, err = vmenv.Call(sender, *self.msg.To(), data, self.gas, self.gasPrice, self.value)
+		if err != nil {
+			glog.V(logger.Core).Infoln("VM call err:", err)
+		}
+	}
+
+	if err != nil && IsValueTransferErr(err) {
+		return nil, nil, nil, InvalidTxError(err)
+	}
+
+	// We aren't interested in errors here. Errors returned by the VM are non-consensus errors and therefor shouldn't bubble up
+	if err != nil {
+		err = nil
 	}
 
 	requiredGas = new(big.Int).Set(self.gasUsed())
 
 	self.refundGas()
-	self.state.AddBalance(self.env.Coinbase, new(big.Int).Mul(self.gasUsed(), self.gasPrice))
+	publicState.AddBalance(self.env.Coinbase(), new(big.Int).Mul(self.gasUsed(), self.gasPrice))
 
+	if isPrivate {
+		return ret, new(big.Int), new(big.Int), err
+	}
 	return ret, requiredGas, self.gasUsed(), err
 }
 
 func (self *StateTransition) refundGas() {
 	// Return eth for remaining gas to the sender account,
 	// exchanged at the original rate.
-	sender := self.from() // err already checked
+	sender, _ := self.from() // err already checked
 	remaining := new(big.Int).Mul(self.gas, self.gasPrice)
 	sender.AddBalance(remaining)
 

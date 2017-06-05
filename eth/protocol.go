@@ -98,11 +98,11 @@ var errorToString = map[int]string{
 
 type txPool interface {
 	// AddBatch should add the given transactions to the pool.
-	AddBatch([]*types.Transaction) error
+	AddBatch([]*types.Transaction)
 
 	// Pending should return pending transactions.
 	// The slice should be modifiable by the caller.
-	Pending() (map[common.Address]types.Transactions, error)
+	Pending() map[common.Address]types.Transactions
 }
 
 // statusData is the network packet for the status message.

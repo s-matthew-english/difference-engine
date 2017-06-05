@@ -25,12 +25,6 @@ var doubleWidth = []*unicode.RangeTable{
 func countGlyphs(s []rune) int {
 	n := 0
 	for _, r := range s {
-		// speed up the common case
-		if r < 127 {
-			n++
-			continue
-		}
-
 		switch {
 		case unicode.IsOneOf(zeroWidth, r):
 		case unicode.IsOneOf(doubleWidth, r):
@@ -45,10 +39,6 @@ func countGlyphs(s []rune) int {
 func countMultiLineGlyphs(s []rune, columns int, start int) int {
 	n := start
 	for _, r := range s {
-		if r < 127 {
-			n++
-			continue
-		}
 		switch {
 		case unicode.IsOneOf(zeroWidth, r):
 		case unicode.IsOneOf(doubleWidth, r):
@@ -68,11 +58,6 @@ func countMultiLineGlyphs(s []rune, columns int, start int) int {
 func getPrefixGlyphs(s []rune, num int) []rune {
 	p := 0
 	for n := 0; n < num && p < len(s); p++ {
-		// speed up the common case
-		if s[p] < 127 {
-			n++
-			continue
-		}
 		if !unicode.IsOneOf(zeroWidth, s[p]) {
 			n++
 		}
@@ -86,11 +71,6 @@ func getPrefixGlyphs(s []rune, num int) []rune {
 func getSuffixGlyphs(s []rune, num int) []rune {
 	p := len(s)
 	for n := 0; n < num && p > 0; p-- {
-		// speed up the common case
-		if s[p-1] < 127 {
-			n++
-			continue
-		}
 		if !unicode.IsOneOf(zeroWidth, s[p-1]) {
 			n++
 		}

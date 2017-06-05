@@ -20,26 +20,29 @@ package main
 import (
 	"encoding/hex"
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/accounts/keystore"
+	"crypto/ecdsa"
+
+	"github.com/ethereum/ethash"
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/console"
 	"github.com/ethereum/go-ethereum/contracts/release"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/eth"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/node"
-	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/rlp"
 	"gopkg.in/urfave/cli.v1"
 )
 
@@ -60,28 +63,41 @@ func init() {
 	// Initialize the CLI app and start Geth
 	app.Action = geth
 	app.HideVersion = true // we have a command to print the version
-	app.Copyright = "Copyright 2013-2016 The go-ethereum Authors"
 	app.Commands = []cli.Command{
-		// See chaincmd.go:
-		initCommand,
 		importCommand,
 		exportCommand,
 		upgradedbCommand,
 		removedbCommand,
 		dumpCommand,
-		// See monitorcmd.go:
 		monitorCommand,
-		// See accountcmd.go:
 		accountCommand,
 		walletCommand,
-		// See consolecmd.go:
 		consoleCommand,
 		attachCommand,
 		javascriptCommand,
-		// See misccmd.go:
-		makedagCommand,
-		versionCommand,
-		licenseCommand,
+		{
+			Action: version,
+			Name:   "version",
+			Usage:  "print ethereum version numbers",
+			Description: `
+The output of this command is supposed to be machine-readable.
+`,
+		},
+		{
+			Action: initGenesis,
+			Name:   "init",
+			Usage:  "bootstraps and initialises a new genesis block (JSON)",
+			Description: `
+The init command initialises a new genesis block and definition for the network.
+This is a destructive action and changes the network in which you will be
+participating.
+`,
+		},
+		{
+			Action: license,
+			Name:   "license",
+			Usage:  "displays geth's license information",
+		},
 	}
 
 	app.Flags = []cli.Flag{
@@ -91,27 +107,20 @@ func init() {
 		utils.BootnodesFlag,
 		utils.DataDirFlag,
 		utils.KeyStoreDirFlag,
-		utils.FastSyncFlag,
-		utils.LightModeFlag,
-		utils.LightServFlag,
-		utils.LightPeersFlag,
-		utils.LightKDFFlag,
+		utils.OlympicFlag,
 		utils.CacheFlag,
+		utils.LightKDFFlag,
 		utils.TrieCacheGenFlag,
 		utils.JSpathFlag,
 		utils.ListenPortFlag,
 		utils.MaxPeersFlag,
 		utils.MaxPendingPeersFlag,
 		utils.EtherbaseFlag,
-		utils.GasPriceFlag,
-		utils.MinerThreadsFlag,
-		utils.MiningEnabledFlag,
 		utils.AutoDAGFlag,
 		utils.TargetGasLimitFlag,
 		utils.NATFlag,
+		utils.NatspecEnabledFlag,
 		utils.NoDiscoverFlag,
-		utils.DiscoveryV5Flag,
-		utils.NetrestrictFlag,
 		utils.NodeKeyFileFlag,
 		utils.NodeKeyHexFlag,
 		utils.RPCEnabledFlag,
@@ -134,20 +143,22 @@ func init() {
 		utils.VMForceJitFlag,
 		utils.VMJitCacheFlag,
 		utils.VMEnableJitFlag,
-		utils.VMEnableDebugFlag,
 		utils.NetworkIdFlag,
 		utils.RPCCORSDomainFlag,
-		utils.EthStatsURLFlag,
 		utils.MetricsEnabledFlag,
 		utils.FakePoWFlag,
 		utils.SolcPathFlag,
-		utils.GpoMinGasPriceFlag,
-		utils.GpoMaxGasPriceFlag,
-		utils.GpoFullBlockRatioFlag,
-		utils.GpobaseStepDownFlag,
-		utils.GpobaseStepUpFlag,
-		utils.GpobaseCorrectionFactorFlag,
 		utils.ExtraDataFlag,
+		utils.VoteAccountFlag,
+		utils.VoteAccountPasswordFlag,
+		utils.VoteBlockMakerAccountFlag,
+		utils.VoteBlockMakerAccountPasswordFlag,
+		utils.VoteMinBlockTimeFlag,
+		utils.VoteMaxBlockTimeFlag,
+		utils.SingleBlockMakerFlag,
+		utils.EnableNodePermissionFlag,
+		utils.RaftModeFlag,
+		utils.RaftBlockTime,
 	}
 	app.Flags = append(app.Flags, debug.Flags...)
 
@@ -170,6 +181,7 @@ func init() {
 	}
 
 	app.After = func(ctx *cli.Context) error {
+		logger.Flush()
 		debug.Exit()
 		console.Stdin.Close() // Resets terminal mode.
 		return nil
@@ -193,25 +205,37 @@ func geth(ctx *cli.Context) error {
 	return nil
 }
 
-func makeFullNode(ctx *cli.Context) *node.Node {
-	// Create the default extradata and construct the base node
-	var clientInfo = struct {
-		Version   uint
-		Name      string
-		GoVersion string
-		Os        string
-	}{uint(params.VersionMajor<<16 | params.VersionMinor<<8 | params.VersionPatch), clientIdentifier, runtime.Version(), runtime.GOOS}
-	extra, err := rlp.EncodeToBytes(clientInfo)
+// initGenesis will initialise the given JSON format genesis file and writes it as
+// the zero'd block (i.e. genesis) or will fail hard if it can't succeed.
+func initGenesis(ctx *cli.Context) error {
+	genesisPath := ctx.Args().First()
+	if len(genesisPath) == 0 {
+		utils.Fatalf("must supply path to genesis JSON file")
+	}
+
+	if ctx.GlobalBool(utils.TestNetFlag.Name) {
+		state.StartingNonce = 1048576 // (2**20)
+	}
+
+	stack := makeFullNode(ctx)
+	chaindb := utils.MakeChainDatabase(ctx, stack)
+
+	genesisFile, err := os.Open(genesisPath)
 	if err != nil {
-		glog.V(logger.Warn).Infoln("error setting canonical miner information:", err)
+		utils.Fatalf("failed to read genesis file: %v", err)
 	}
-	if uint64(len(extra)) > params.MaximumExtraDataSize.Uint64() {
-		glog.V(logger.Warn).Infoln("error setting canonical miner information: extra exceeds", params.MaximumExtraDataSize)
-		glog.V(logger.Debug).Infof("extra: %x\n", extra)
-		extra = nil
+
+	block, err := core.WriteGenesisBlock(chaindb, genesisFile)
+	if err != nil {
+		utils.Fatalf("failed to write genesis block: %v", err)
 	}
+	glog.V(logger.Info).Infof("successfully wrote genesis block and/or chain rule set: %x", block.Hash())
+	return nil
+}
+
+func makeFullNode(ctx *cli.Context) *node.Node {
 	stack := utils.MakeNode(ctx, clientIdentifier, gitCommit)
-	utils.RegisterEthService(ctx, stack, extra)
+	utils.RegisterEthService(ctx, stack, utils.MakeDefaultExtraData(clientIdentifier))
 
 	// Whisper must be explicitly enabled, but is auto-enabled in --dev mode.
 	shhEnabled := ctx.GlobalBool(utils.WhisperEnabledFlag.Name)
@@ -219,17 +243,14 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 	if shhEnabled || shhAutoEnabled {
 		utils.RegisterShhService(stack)
 	}
-	// Add the Ethereum Stats daemon if requested
-	if url := ctx.GlobalString(utils.EthStatsURLFlag.Name); url != "" {
-		utils.RegisterEthStatsService(stack, url)
-	}
+
 	// Add the release oracle service so it boots along with node.
 	if err := stack.Register(func(ctx *node.ServiceContext) (node.Service, error) {
 		config := release.Config{
 			Oracle: relOracle,
-			Major:  uint32(params.VersionMajor),
-			Minor:  uint32(params.VersionMinor),
-			Patch:  uint32(params.VersionPatch),
+			Major:  uint32(utils.VersionMajor),
+			Minor:  uint32(utils.VersionMinor),
+			Patch:  uint32(utils.VersionPatch),
 		}
 		commit, _ := hex.DecodeString(gitCommit)
 		copy(config.Commit[:], commit)
@@ -237,6 +258,7 @@ func makeFullNode(ctx *cli.Context) *node.Node {
 	}); err != nil {
 		utils.Fatalf("Failed to register the Geth release oracle service: %v", err)
 	}
+
 	return stack
 }
 
@@ -248,58 +270,130 @@ func startNode(ctx *cli.Context, stack *node.Node) {
 	utils.StartNode(stack)
 
 	// Unlock any account specifically requested
-	ks := stack.AccountManager().Backends(keystore.KeyStoreType)[0].(*keystore.KeyStore)
-
+	accman := stack.AccountManager()
 	passwords := utils.MakePasswordList(ctx)
-	unlocks := strings.Split(ctx.GlobalString(utils.UnlockedAccountFlag.Name), ",")
-	for i, account := range unlocks {
+	accounts := strings.Split(ctx.GlobalString(utils.UnlockedAccountFlag.Name), ",")
+	for i, account := range accounts {
 		if trimmed := strings.TrimSpace(account); trimmed != "" {
-			unlockAccount(ctx, ks, trimmed, i, passwords)
+			unlockAccount(ctx, accman, trimmed, i, passwords)
 		}
 	}
-	// Register wallet event handlers to open and auto-derive wallets
-	events := make(chan accounts.WalletEvent, 16)
-	stack.AccountManager().Subscribe(events)
 
-	go func() {
-		// Create an chain state reader for self-derivation
-		rpcClient, err := stack.Attach()
+	if ctx.GlobalBool(utils.RaftModeFlag.Name) {
+		return
+	}
+
+	// Start auxiliary services for Quorum Chain
+
+	var ethereum *eth.Ethereum
+	if err := stack.Service(&ethereum); err != nil {
+		utils.Fatalf("ethereum service not running: %v", err)
+	}
+
+	client, err := stack.Attach()
+	if err != nil {
+		utils.Fatalf("Unable to attach to node: %v", err)
+	}
+
+	var (
+		voteKey      *ecdsa.PrivateKey
+		blockVoteKey *ecdsa.PrivateKey
+	)
+
+	if addr := ctx.GlobalString(utils.VoteAccountFlag.Name); addr != "" {
+		addr = strings.TrimSpace(addr)
+		var passwd []string
+		if ctx.GlobalIsSet(utils.VoteAccountPasswordFlag.Name) {
+			passwd = append(passwd, ctx.GlobalString(utils.VoteAccountPasswordFlag.Name))
+		}
+
+		unlockAccount(ctx, accman, addr, 0, passwd)
+		// unlockAccounts fatals in case the account could not be unlocked
+		voteKey, err = accman.Key(common.HexToAddress(addr))
 		if err != nil {
-			utils.Fatalf("Failed to attach to self: %v", err)
-		}
-		stateReader := ethclient.NewClient(rpcClient)
-
-		// Open and self derive any wallets already attached
-		for _, wallet := range stack.AccountManager().Wallets() {
-			if err := wallet.Open(""); err != nil {
-				glog.V(logger.Warn).Infof("Failed to open wallet %s: %v", wallet.URL(), err)
-			} else {
-				wallet.SelfDerive(accounts.DefaultBaseDerivationPath, stateReader)
-			}
-		}
-		// Listen for wallet event till termination
-		for event := range events {
-			if event.Arrive {
-				if err := event.Wallet.Open(""); err != nil {
-					glog.V(logger.Info).Infof("New wallet appeared: %s, failed to open: %s", event.Wallet.URL(), err)
-				} else {
-					glog.V(logger.Info).Infof("New wallet appeared: %s, %s", event.Wallet.URL(), event.Wallet.Status())
-					event.Wallet.SelfDerive(accounts.DefaultBaseDerivationPath, stateReader)
-				}
-			} else {
-				glog.V(logger.Info).Infof("Old wallet dropped:  %s", event.Wallet.URL())
-				event.Wallet.Close()
-			}
-		}
-	}()
-	// Start auxiliary services if enabled
-	if ctx.GlobalBool(utils.MiningEnabledFlag.Name) {
-		var ethereum *eth.Ethereum
-		if err := stack.Service(&ethereum); err != nil {
-			utils.Fatalf("ethereum service not running: %v", err)
-		}
-		if err := ethereum.StartMining(ctx.GlobalInt(utils.MinerThreadsFlag.Name)); err != nil {
-			utils.Fatalf("Failed to start mining: %v", err)
+			utils.Fatalf("Unable to unlock vote key: %v", err)
 		}
 	}
+
+	if addr := ctx.GlobalString(utils.VoteBlockMakerAccountFlag.Name); addr != "" {
+		addr = strings.TrimSpace(addr)
+		var passwd []string
+		if ctx.GlobalIsSet(utils.VoteBlockMakerAccountPasswordFlag.Name) {
+			passwd = append(passwd, ctx.GlobalString(utils.VoteBlockMakerAccountPasswordFlag.Name))
+		}
+		unlockAccount(ctx, accman, addr, 0, passwd)
+		// unlockAccounts fatals in case the account could not be unlocked
+		blockVoteKey, err = accman.Key(common.HexToAddress(addr[2:]))
+		if err != nil {
+			utils.Fatalf("Unable to unlock block maker key: %v", err)
+		}
+	}
+
+	if err := ethereum.StartBlockVoting(client, voteKey, blockVoteKey); err != nil {
+		utils.Fatalf("Failed to start block voting: %v", err)
+	}
+}
+
+func makedag(ctx *cli.Context) error {
+	args := ctx.Args()
+	wrongArgs := func() {
+		utils.Fatalf(`Usage: geth makedag <block number> <outputdir>`)
+	}
+	switch {
+	case len(args) == 2:
+		blockNum, err := strconv.ParseUint(args[0], 0, 64)
+		dir := args[1]
+		if err != nil {
+			wrongArgs()
+		} else {
+			dir = filepath.Clean(dir)
+			// seems to require a trailing slash
+			if !strings.HasSuffix(dir, "/") {
+				dir = dir + "/"
+			}
+			_, err = ioutil.ReadDir(dir)
+			if err != nil {
+				utils.Fatalf("Can't find dir")
+			}
+			fmt.Println("making DAG, this could take awhile...")
+			ethash.MakeDAG(blockNum, dir)
+		}
+	default:
+		wrongArgs()
+	}
+	return nil
+}
+
+func version(c *cli.Context) error {
+	fmt.Println(strings.Title(clientIdentifier))
+	fmt.Println("Version:", utils.Version)
+	if gitCommit != "" {
+		fmt.Println("Git Commit:", gitCommit)
+	}
+	fmt.Println("Protocol Versions:", eth.ProtocolVersions)
+	fmt.Println("Network Id:", c.GlobalInt(utils.NetworkIdFlag.Name))
+	fmt.Println("Go Version:", runtime.Version())
+	fmt.Println("OS:", runtime.GOOS)
+	fmt.Printf("GOPATH=%s\n", os.Getenv("GOPATH"))
+	fmt.Printf("GOROOT=%s\n", runtime.GOROOT())
+
+	return nil
+}
+
+func license(c *cli.Context) error {
+	fmt.Println(`Geth is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Geth is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with geth. If not, see <http://www.gnu.org/licenses/>.
+`)
+
+	return nil
 }

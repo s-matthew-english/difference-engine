@@ -48,15 +48,6 @@ func init() {
 	exp.Exp(metrics.DefaultRegistry)
 }
 
-// NewCounter create a new metrics Counter, either a real one of a NOP stub depending
-// on the metrics flag.
-func NewCounter(name string) metrics.Counter {
-	if !Enabled {
-		return new(metrics.NilCounter)
-	}
-	return metrics.GetOrRegisterCounter(name, metrics.DefaultRegistry)
-}
-
 // NewMeter create a new metrics Meter, either a real one of a NOP stub depending
 // on the metrics flag.
 func NewMeter(name string) metrics.Meter {

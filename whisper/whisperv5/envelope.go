@@ -14,14 +14,14 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
-// Contains the Whisper protocol Envelope element.
+// Contains the Whisper protocol Envelope element. For formal details please see
+// the specs at https://github.com/ethereum/wiki/wiki/Whisper-PoC-1-Protocol-Spec#envelopes.
 
 package whisperv5
 
 import (
 	"crypto/ecdsa"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math"
 	"time"
@@ -73,7 +73,7 @@ func NewEnvelope(ttl uint32, topic TopicType, salt []byte, aesNonce []byte, msg 
 }
 
 func (e *Envelope) IsSymmetric() bool {
-	return len(e.AESNonce) > 0
+	return e.AESNonce != nil
 }
 
 func (e *Envelope) isAsymmetric() bool {
@@ -86,8 +86,8 @@ func (e *Envelope) Ver() uint64 {
 
 // Seal closes the envelope by spending the requested amount of time as a proof
 // of work on hashing the data.
-func (e *Envelope) Seal(options *MessageParams) error {
-	var target, bestBit int
+func (e *Envelope) Seal(options *MessageParams) {
+	var target int
 	if options.PoW == 0 {
 		// adjust for the duration of Seal() execution only if execution time is predefined unconditionally
 		e.Expiry += options.WorkTime
@@ -99,7 +99,7 @@ func (e *Envelope) Seal(options *MessageParams) error {
 	h := crypto.Keccak256(e.rlpWithoutNonce())
 	copy(buf[:32], h)
 
-	finish := time.Now().Add(time.Duration(options.WorkTime) * time.Second).UnixNano()
+	finish, bestBit := time.Now().Add(time.Duration(options.WorkTime)*time.Second).UnixNano(), 0
 	for nonce := uint64(0); time.Now().UnixNano() < finish; {
 		for i := 0; i < 1024; i++ {
 			binary.BigEndian.PutUint64(buf[56:], nonce)
@@ -108,18 +108,12 @@ func (e *Envelope) Seal(options *MessageParams) error {
 			if firstBit > bestBit {
 				e.EnvNonce, bestBit = nonce, firstBit
 				if target > 0 && bestBit >= target {
-					return nil
+					return
 				}
 			}
 			nonce++
 		}
 	}
-
-	if target > 0 && bestBit < target {
-		return errors.New("Failed to reach the PoW target")
-	}
-
-	return nil
 }
 
 func (e *Envelope) PoW() float64 {
@@ -137,7 +131,7 @@ func (e *Envelope) calculatePoW(diff uint32) {
 	h = crypto.Keccak256(buf)
 	firstBit := common.FirstBitSet(common.BigD(h))
 	x := math.Pow(2, float64(firstBit))
-	x /= float64(len(e.Data)) // we only count e.Data, other variable-sized members are checked in Whisper.add()
+	x /= float64(len(e.Data))
 	x /= float64(e.TTL + diff)
 	e.pow = x
 }

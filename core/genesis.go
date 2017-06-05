@@ -17,7 +17,6 @@
 package core
 
 import (
-	"compress/bzip2"
 	"compress/gzip"
 	"encoding/base64"
 	"encoding/json"
@@ -44,7 +43,7 @@ func WriteGenesisBlock(chainDb ethdb.Database, reader io.Reader) (*types.Block, 
 	}
 
 	var genesis struct {
-		ChainConfig *params.ChainConfig `json:"config"`
+		ChainConfig *ChainConfig `json:"config"`
 		Nonce       string
 		Timestamp   string
 		ParentHash  string
@@ -57,7 +56,6 @@ func WriteGenesisBlock(chainDb ethdb.Database, reader io.Reader) (*types.Block, 
 			Code    string
 			Storage map[string]string
 			Balance string
-			Nonce   string
 		}
 	}
 
@@ -70,13 +68,12 @@ func WriteGenesisBlock(chainDb ethdb.Database, reader io.Reader) (*types.Block, 
 	for addr, account := range genesis.Alloc {
 		address := common.HexToAddress(addr)
 		statedb.AddBalance(address, common.String2Big(account.Balance))
-		statedb.SetCode(address, common.FromHex(account.Code))
-		statedb.SetNonce(address, common.String2Big(account.Nonce).Uint64())
+		statedb.SetCode(address, common.Hex2Bytes(account.Code))
 		for key, value := range account.Storage {
 			statedb.SetState(address, common.HexToHash(key), common.HexToHash(value))
 		}
 	}
-	root, stateBatch := statedb.CommitBatch(false)
+	root, stateBatch := statedb.CommitBatch()
 
 	difficulty := common.String2Big(genesis.Difficulty)
 	block := types.NewBlock(&types.Header{
@@ -131,7 +128,7 @@ func GenesisBlockForTesting(db ethdb.Database, addr common.Address, balance *big
 	statedb, _ := state.New(common.Hash{}, db)
 	obj := statedb.GetOrNewStateObject(addr)
 	obj.SetBalance(balance)
-	root, err := statedb.Commit(false)
+	root, err := statedb.Commit()
 	if err != nil {
 		panic(fmt.Sprintf("cannot write state: %v", err))
 	}
@@ -174,10 +171,16 @@ func WriteDefaultGenesisBlock(chainDb ethdb.Database) (*types.Block, error) {
 	return WriteGenesisBlock(chainDb, strings.NewReader(DefaultGenesisBlock()))
 }
 
-// WriteTestNetGenesisBlock assembles the test network genesis block and
+// WriteTestNetGenesisBlock assembles the Morden test network genesis block and
 // writes it - along with all associated state - into a chain database.
 func WriteTestNetGenesisBlock(chainDb ethdb.Database) (*types.Block, error) {
-	return WriteGenesisBlock(chainDb, strings.NewReader(DefaultTestnetGenesisBlock()))
+	return WriteGenesisBlock(chainDb, strings.NewReader(TestNetGenesisBlock()))
+}
+
+// WriteOlympicGenesisBlock assembles the Olympic genesis block and writes it
+// along with all associated state into a chain database.
+func WriteOlympicGenesisBlock(db ethdb.Database) (*types.Block, error) {
+	return WriteGenesisBlock(db, strings.NewReader(OlympicGenesisBlock()))
 }
 
 // DefaultGenesisBlock assembles a JSON string representing the default Ethereum
@@ -194,23 +197,48 @@ func DefaultGenesisBlock() string {
 	return string(blob)
 }
 
-// DefaultTestnetGenesisBlock assembles a JSON string representing the default Ethereum
-// test network genesis block.
-func DefaultTestnetGenesisBlock() string {
-	reader := bzip2.NewReader(base64.NewDecoder(base64.StdEncoding, strings.NewReader(defaultTestnetGenesisBlock)))
-	blob, err := ioutil.ReadAll(reader)
-	if err != nil {
-		panic(fmt.Sprintf("failed to load default genesis: %v", err))
-	}
-	return string(blob)
+// OlympicGenesisBlock assembles a JSON string representing the Olympic genesis
+// block.
+func OlympicGenesisBlock() string {
+	return fmt.Sprintf(`{
+		"nonce":"0x%x",
+		"gasLimit":"0x%x",
+		"difficulty":"0x%x",
+		"alloc": {
+			"0000000000000000000000000000000000000001": {"balance": "1"},
+			"0000000000000000000000000000000000000002": {"balance": "1"},
+			"0000000000000000000000000000000000000003": {"balance": "1"},
+			"0000000000000000000000000000000000000004": {"balance": "1"},
+			"dbdbdb2cbd23b783741e8d7fcf51e459b497e4a6": {"balance": "1606938044258990275541962092341162602522202993782792835301376"},
+			"e4157b34ea9615cfbde6b4fda419828124b70c78": {"balance": "1606938044258990275541962092341162602522202993782792835301376"},
+			"b9c015918bdaba24b4ff057a92a3873d6eb201be": {"balance": "1606938044258990275541962092341162602522202993782792835301376"},
+			"6c386a4b26f73c802f34673f7248bb118f97424a": {"balance": "1606938044258990275541962092341162602522202993782792835301376"},
+			"cd2a3d9f938e13cd947ec05abc7fe734df8dd826": {"balance": "1606938044258990275541962092341162602522202993782792835301376"},
+			"2ef47100e0787b915105fd5e3f4ff6752079d5cb": {"balance": "1606938044258990275541962092341162602522202993782792835301376"},
+			"e6716f9544a56c530d868e4bfbacb172315bdead": {"balance": "1606938044258990275541962092341162602522202993782792835301376"},
+			"1a26338f0d905e295fccb71fa9ea849ffa12aaf4": {"balance": "1606938044258990275541962092341162602522202993782792835301376"}
+		}
+	}`, types.EncodeNonce(42), params.GenesisGasLimit.Bytes(), params.GenesisDifficulty.Bytes())
 }
 
-// DevGenesisBlock assembles a JSON string representing a local dev genesis block.
-func DevGenesisBlock() string {
-	reader := bzip2.NewReader(base64.NewDecoder(base64.StdEncoding, strings.NewReader(defaultDevnetGenesisBlock)))
-	blob, err := ioutil.ReadAll(reader)
-	if err != nil {
-		panic(fmt.Sprintf("failed to load dev genesis: %v", err))
-	}
-	return string(blob)
+// TestNetGenesisBlock assembles a JSON string representing the Morden test net
+// genenis block.
+func TestNetGenesisBlock() string {
+	return fmt.Sprintf(`{
+		"nonce": "0x%x",
+		"difficulty": "0x20000",
+		"mixhash": "0x00000000000000000000000000000000000000647572616c65787365646c6578",
+		"coinbase": "0x0000000000000000000000000000000000000000",
+		"timestamp": "0x00",
+		"parentHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+		"extraData": "0x",
+		"gasLimit": "0x2FAF0800",
+		"alloc": {
+			"0000000000000000000000000000000000000001": { "balance": "1" },
+			"0000000000000000000000000000000000000002": { "balance": "1" },
+			"0000000000000000000000000000000000000003": { "balance": "1" },
+			"0000000000000000000000000000000000000004": { "balance": "1" },
+			"102e61f5d8f9bc71d0ad4a084df4e65e05ce0e1c": { "balance": "1606938044258990275541962092341162602522202993782792835301376" }
+		}
+	}`, types.EncodeNonce(0x6d6f7264656e))
 }

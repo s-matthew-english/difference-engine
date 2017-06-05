@@ -121,7 +121,8 @@ func TestNodeKeyPersistency(t *testing.T) {
 	if _, err := os.Stat(keyfile); err != nil {
 		t.Fatalf("node key not persisted to data directory: %v", err)
 	}
-	if _, err = crypto.LoadECDSA(keyfile); err != nil {
+	key, err = crypto.LoadECDSA(keyfile)
+	if err != nil {
 		t.Fatalf("failed to load freshly persisted node key: %v", err)
 	}
 	blob1, err := ioutil.ReadFile(keyfile)
@@ -136,7 +137,7 @@ func TestNodeKeyPersistency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to read previously persisted node key: %v", err)
 	}
-	if !bytes.Equal(blob1, blob2) {
+	if bytes.Compare(blob1, blob2) != 0 {
 		t.Fatalf("persisted node key mismatch: have %x, want %x", blob2, blob1)
 	}
 

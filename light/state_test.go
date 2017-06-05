@@ -22,12 +22,32 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/trie"
 	"golang.org/x/net/context"
 )
+
+type testOdr struct {
+	OdrBackend
+	sdb, ldb ethdb.Database
+}
+
+func (odr *testOdr) Database() ethdb.Database {
+	return odr.ldb
+}
+
+func (odr *testOdr) Retrieve(ctx context.Context, req OdrRequest) error {
+	switch req := req.(type) {
+	case *TrieRequest:
+		t, _ := trie.New(req.root, odr.sdb)
+		req.proof = t.Prove(req.key)
+	case *NodeDataRequest:
+		req.data, _ = odr.sdb.Get(req.hash[:])
+	}
+	req.StoreResult(odr.ldb)
+	return nil
+}
 
 func makeTestState() (common.Hash, ethdb.Database) {
 	sdb, _ := ethdb.NewMemDatabase()
@@ -41,17 +61,15 @@ func makeTestState() (common.Hash, ethdb.Database) {
 		st.AddBalance(addr, big.NewInt(int64(i)))
 		st.SetCode(addr, []byte{i, i, i})
 	}
-	root, _ := st.Commit(false)
+	root, _ := st.Commit()
 	return root, sdb
 }
 
 func TestLightStateOdr(t *testing.T) {
 	root, sdb := makeTestState()
-	header := &types.Header{Root: root, Number: big.NewInt(0)}
-	core.WriteHeader(sdb, header)
 	ldb, _ := ethdb.NewMemDatabase()
 	odr := &testOdr{sdb: sdb, ldb: ldb}
-	ls := NewLightState(StateTrieID(header), odr)
+	ls := NewLightState(root, odr)
 	ctx := context.Background()
 
 	for i := byte(0); i < 100; i++ {
@@ -133,11 +151,9 @@ func TestLightStateOdr(t *testing.T) {
 
 func TestLightStateSetCopy(t *testing.T) {
 	root, sdb := makeTestState()
-	header := &types.Header{Root: root, Number: big.NewInt(0)}
-	core.WriteHeader(sdb, header)
 	ldb, _ := ethdb.NewMemDatabase()
 	odr := &testOdr{sdb: sdb, ldb: ldb}
-	ls := NewLightState(StateTrieID(header), odr)
+	ls := NewLightState(root, odr)
 	ctx := context.Background()
 
 	for i := byte(0); i < 100; i++ {
@@ -211,11 +227,9 @@ func TestLightStateSetCopy(t *testing.T) {
 
 func TestLightStateDelete(t *testing.T) {
 	root, sdb := makeTestState()
-	header := &types.Header{Root: root, Number: big.NewInt(0)}
-	core.WriteHeader(sdb, header)
 	ldb, _ := ethdb.NewMemDatabase()
 	odr := &testOdr{sdb: sdb, ldb: ldb}
-	ls := NewLightState(StateTrieID(header), odr)
+	ls := NewLightState(root, odr)
 	ctx := context.Background()
 
 	addr := common.Address{42}
@@ -228,21 +242,21 @@ func TestLightStateDelete(t *testing.T) {
 		t.Fatalf("HasAccount returned false, expected true")
 	}
 
-	b, err = ls.HasSuicided(ctx, addr)
+	b, err = ls.IsDeleted(ctx, addr)
 	if err != nil {
-		t.Fatalf("HasSuicided error: %v", err)
+		t.Fatalf("IsDeleted error: %v", err)
 	}
 	if b {
-		t.Fatalf("HasSuicided returned true, expected false")
+		t.Fatalf("IsDeleted returned true, expected false")
 	}
 
-	ls.Suicide(ctx, addr)
+	ls.Delete(ctx, addr)
 
-	b, err = ls.HasSuicided(ctx, addr)
+	b, err = ls.IsDeleted(ctx, addr)
 	if err != nil {
-		t.Fatalf("HasSuicided error: %v", err)
+		t.Fatalf("IsDeleted error: %v", err)
 	}
 	if !b {
-		t.Fatalf("HasSuicided returned false, expected true")
+		t.Fatalf("IsDeleted returned false, expected true")
 	}
 }

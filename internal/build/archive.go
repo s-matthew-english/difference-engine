@@ -41,14 +41,14 @@ type Archive interface {
 	Close() error
 }
 
-func NewArchive(file *os.File) (Archive, string) {
+func NewArchive(file *os.File) Archive {
 	switch {
 	case strings.HasSuffix(file.Name(), ".zip"):
-		return NewZipArchive(file), strings.TrimSuffix(file.Name(), ".zip")
+		return NewZipArchive(file)
 	case strings.HasSuffix(file.Name(), ".tar.gz"):
-		return NewTarballArchive(file), strings.TrimSuffix(file.Name(), ".tar.gz")
+		return NewTarballArchive(file)
 	default:
-		return nil, ""
+		return nil
 	}
 }
 
@@ -74,24 +74,17 @@ func AddFile(a Archive, file string) error {
 }
 
 // WriteArchive creates an archive containing the given files.
-func WriteArchive(name string, files []string) (err error) {
-	archfd, err := os.Create(name)
+func WriteArchive(basename, ext string, files []string) error {
+	archfd, err := os.Create(basename + ext)
 	if err != nil {
 		return err
 	}
-
-	defer func() {
-		archfd.Close()
-		// Remove the half-written archive on failure.
-		if err != nil {
-			os.Remove(name)
-		}
-	}()
-	archive, basename := NewArchive(archfd)
+	defer archfd.Close()
+	archive := NewArchive(archfd)
 	if archive == nil {
-		return fmt.Errorf("unknown archive extension")
+		return fmt.Errorf("unknown archive extension: %s", ext)
 	}
-	fmt.Println(name)
+	fmt.Println(basename + ext)
 	if err := archive.Directory(basename); err != nil {
 		return err
 	}
@@ -125,7 +118,6 @@ func (a *ZipArchive) Header(fi os.FileInfo) (io.Writer, error) {
 		return nil, fmt.Errorf("can't make zip header: %v", err)
 	}
 	head.Name = a.dir + head.Name
-	head.Method = zip.Deflate
 	w, err := a.zipw.CreateHeader(head)
 	if err != nil {
 		return nil, fmt.Errorf("can't add zip header: %v", err)

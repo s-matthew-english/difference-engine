@@ -21,7 +21,6 @@ import (
 	"io/ioutil"
 
 	"github.com/ethereum/go-ethereum/accounts"
-	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/cmd/utils"
 	"github.com/ethereum/go-ethereum/console"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -32,37 +31,30 @@ import (
 
 var (
 	walletCommand = cli.Command{
-		Name:      "wallet",
-		Usage:     "Manage Ethereum presale wallets",
-		ArgsUsage: "",
-		Category:  "ACCOUNT COMMANDS",
+		Name:  "wallet",
+		Usage: "ethereum presale wallet",
+		Subcommands: []cli.Command{
+			{
+				Action: importWallet,
+				Name:   "import",
+				Usage:  "import ethereum presale wallet",
+			},
+		},
 		Description: `
-    geth wallet import /path/to/my/presale.wallet
+
+    get wallet import /path/to/my/presale.wallet
 
 will prompt for your password and imports your ether presale account.
 It can be used non-interactively with the --password option taking a
 passwordfile as argument containing the wallet password in plaintext.
 
-`,
-		Subcommands: []cli.Command{
-			{
-				Action:    importWallet,
-				Name:      "import",
-				Usage:     "Import Ethereum presale wallet",
-				ArgsUsage: "<keyFile>",
-				Description: `
-TODO: Please write this
-`,
-			},
-		},
-	}
+`}
 	accountCommand = cli.Command{
-		Action:    accountList,
-		Name:      "account",
-		Usage:     "Manage accounts",
-		ArgsUsage: "",
-		Category:  "ACCOUNT COMMANDS",
+		Action: accountList,
+		Name:   "account",
+		Usage:  "manage accounts",
 		Description: `
+
 Manage accounts lets you create new accounts, list all existing accounts,
 import a private key into a new account.
 
@@ -94,21 +86,17 @@ And finally. DO NOT FORGET YOUR PASSWORD.
 `,
 		Subcommands: []cli.Command{
 			{
-				Action:    accountList,
-				Name:      "list",
-				Usage:     "Print account addresses",
-				ArgsUsage: " ",
-				Description: `
-TODO: Please write this
-`,
+				Action: accountList,
+				Name:   "list",
+				Usage:  "print account addresses",
 			},
 			{
-				Action:    accountCreate,
-				Name:      "new",
-				Usage:     "Create a new account",
-				ArgsUsage: " ",
+				Action: accountCreate,
+				Name:   "new",
+				Usage:  "create a new account",
 				Description: `
-    geth account new
+
+    ethereum account new
 
 Creates a new account. Prints the address.
 
@@ -118,19 +106,19 @@ You must remember this passphrase to unlock your account in the future.
 
 For non-interactive use the passphrase can be specified with the --password flag:
 
-    geth --password <passwordfile> account new
+    ethereum --password <passwordfile> account new
 
 Note, this is meant to be used for testing only, it is a bad idea to save your
 password to file or expose in any other way.
-`,
+					`,
 			},
 			{
-				Action:    accountUpdate,
-				Name:      "update",
-				Usage:     "Update an existing account",
-				ArgsUsage: "<address>",
+				Action: accountUpdate,
+				Name:   "update",
+				Usage:  "update an existing account",
 				Description: `
-    geth account update <address>
+
+    ethereum account update <address>
 
 Update an existing account.
 
@@ -142,19 +130,19 @@ format to the newest format or change the password for an account.
 
 For non-interactive use the passphrase can be specified with the --password flag:
 
-    geth --password <passwordfile> account update <address>
+    ethereum --password <passwordfile> account update <address>
 
 Since only one password can be given, only format update can be performed,
 changing your password is only possible interactively.
-`,
+					`,
 			},
 			{
-				Action:    accountImport,
-				Name:      "import",
-				Usage:     "Import a private key into a new account",
-				ArgsUsage: "<keyFile>",
+				Action: accountImport,
+				Name:   "import",
+				Usage:  "import a private key into a new account",
 				Description: `
-    geth account import <keyfile>
+
+    ethereum account import <keyfile>
 
 Imports an unencrypted private key from <keyfile> and creates a new account.
 Prints the address.
@@ -167,13 +155,13 @@ You must remember this passphrase to unlock your account in the future.
 
 For non-interactive use the passphrase can be specified with the -password flag:
 
-    geth --password <passwordfile> account import <keyfile>
+    ethereum --password <passwordfile> account import <keyfile>
 
 Note:
 As you can directly copy your encrypted accounts to another ethereum instance,
 this import mechanism is not needed when you transfer an account between
 nodes.
-`,
+					`,
 			},
 		},
 	}
@@ -181,36 +169,31 @@ nodes.
 
 func accountList(ctx *cli.Context) error {
 	stack := utils.MakeNode(ctx, clientIdentifier, gitCommit)
-
-	var index int
-	for _, wallet := range stack.AccountManager().Wallets() {
-		for _, account := range wallet.Accounts() {
-			fmt.Printf("Account #%d: {%x} %s\n", index, account.Address, &account.URL)
-			index++
-		}
+	for i, acct := range stack.AccountManager().Accounts() {
+		fmt.Printf("Account #%d: {%x} %s\n", i, acct.Address, acct.File)
 	}
 	return nil
 }
 
 // tries unlocking the specified account a few times.
-func unlockAccount(ctx *cli.Context, ks *keystore.KeyStore, address string, i int, passwords []string) (accounts.Account, string) {
-	account, err := utils.MakeAddress(ks, address)
+func unlockAccount(ctx *cli.Context, accman *accounts.Manager, address string, i int, passwords []string) (accounts.Account, string) {
+	account, err := utils.MakeAddress(accman, address)
 	if err != nil {
 		utils.Fatalf("Could not list accounts: %v", err)
 	}
 	for trials := 0; trials < 3; trials++ {
 		prompt := fmt.Sprintf("Unlocking account %s | Attempt %d/%d", address, trials+1, 3)
 		password := getPassPhrase(prompt, false, i, passwords)
-		err = ks.Unlock(account, password)
+		err = accman.Unlock(account, password)
 		if err == nil {
 			glog.V(logger.Info).Infof("Unlocked account %x", account.Address)
 			return account, password
 		}
-		if err, ok := err.(*keystore.AmbiguousAddrError); ok {
+		if err, ok := err.(*accounts.AmbiguousAddrError); ok {
 			glog.V(logger.Info).Infof("Unlocked account %x", account.Address)
-			return ambiguousAddrRecovery(ks, err, password), password
+			return ambiguousAddrRecovery(accman, err, password), password
 		}
-		if err != keystore.ErrDecrypt {
+		if err != accounts.ErrDecrypt {
 			// No need to prompt again if the error is not decryption-related.
 			break
 		}
@@ -250,15 +233,15 @@ func getPassPhrase(prompt string, confirmation bool, i int, passwords []string) 
 	return password
 }
 
-func ambiguousAddrRecovery(ks *keystore.KeyStore, err *keystore.AmbiguousAddrError, auth string) accounts.Account {
+func ambiguousAddrRecovery(am *accounts.Manager, err *accounts.AmbiguousAddrError, auth string) accounts.Account {
 	fmt.Printf("Multiple key files exist for address %x:\n", err.Addr)
 	for _, a := range err.Matches {
-		fmt.Println("  ", a.URL)
+		fmt.Println("  ", a.File)
 	}
 	fmt.Println("Testing your passphrase against all of them...")
 	var match *accounts.Account
 	for _, a := range err.Matches {
-		if err := ks.Unlock(a, auth); err == nil {
+		if err := am.Unlock(a, auth); err == nil {
 			match = &a
 			break
 		}
@@ -266,11 +249,11 @@ func ambiguousAddrRecovery(ks *keystore.KeyStore, err *keystore.AmbiguousAddrErr
 	if match == nil {
 		utils.Fatalf("None of the listed files could be unlocked.")
 	}
-	fmt.Printf("Your passphrase unlocked %s\n", match.URL)
+	fmt.Printf("Your passphrase unlocked %s\n", match.File)
 	fmt.Println("In order to avoid this warning, you need to remove the following duplicate key files:")
 	for _, a := range err.Matches {
 		if a != *match {
-			fmt.Println("  ", a.URL)
+			fmt.Println("  ", a.File)
 		}
 	}
 	return *match
@@ -281,8 +264,7 @@ func accountCreate(ctx *cli.Context) error {
 	stack := utils.MakeNode(ctx, clientIdentifier, gitCommit)
 	password := getPassPhrase("Your new account is locked with a password. Please give a password. Do not forget this password.", true, 0, utils.MakePasswordList(ctx))
 
-	ks := stack.AccountManager().Backends(keystore.KeyStoreType)[0].(*keystore.KeyStore)
-	account, err := ks.NewAccount(password)
+	account, err := stack.AccountManager().NewAccount(password)
 	if err != nil {
 		utils.Fatalf("Failed to create account: %v", err)
 	}
@@ -297,11 +279,9 @@ func accountUpdate(ctx *cli.Context) error {
 		utils.Fatalf("No accounts specified to update")
 	}
 	stack := utils.MakeNode(ctx, clientIdentifier, gitCommit)
-	ks := stack.AccountManager().Backends(keystore.KeyStoreType)[0].(*keystore.KeyStore)
-
-	account, oldPassword := unlockAccount(ctx, ks, ctx.Args().First(), 0, nil)
+	account, oldPassword := unlockAccount(ctx, stack.AccountManager(), ctx.Args().First(), 0, nil)
 	newPassword := getPassPhrase("Please give a new password. Do not forget this password.", true, 0, nil)
-	if err := ks.Update(account, oldPassword, newPassword); err != nil {
+	if err := stack.AccountManager().Update(account, oldPassword, newPassword); err != nil {
 		utils.Fatalf("Could not update the account: %v", err)
 	}
 	return nil
@@ -319,9 +299,7 @@ func importWallet(ctx *cli.Context) error {
 
 	stack := utils.MakeNode(ctx, clientIdentifier, gitCommit)
 	passphrase := getPassPhrase("", false, 0, utils.MakePasswordList(ctx))
-
-	ks := stack.AccountManager().Backends(keystore.KeyStoreType)[0].(*keystore.KeyStore)
-	acct, err := ks.ImportPreSaleKey(keyJson, passphrase)
+	acct, err := stack.AccountManager().ImportPreSaleKey(keyJson, passphrase)
 	if err != nil {
 		utils.Fatalf("%v", err)
 	}
@@ -340,9 +318,7 @@ func accountImport(ctx *cli.Context) error {
 	}
 	stack := utils.MakeNode(ctx, clientIdentifier, gitCommit)
 	passphrase := getPassPhrase("Your new account is locked with a password. Please give a password. Do not forget this password.", true, 0, utils.MakePasswordList(ctx))
-
-	ks := stack.AccountManager().Backends(keystore.KeyStoreType)[0].(*keystore.KeyStore)
-	acct, err := ks.ImportECDSA(key, passphrase)
+	acct, err := stack.AccountManager().ImportECDSA(key, passphrase)
 	if err != nil {
 		utils.Fatalf("Could not create the account: %v", err)
 	}

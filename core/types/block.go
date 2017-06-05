@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto/sha3"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -64,15 +63,23 @@ func (n BlockNonce) Uint64() uint64 {
 
 // MarshalJSON implements json.Marshaler
 func (n BlockNonce) MarshalJSON() ([]byte, error) {
-	return hexutil.Bytes(n[:]).MarshalJSON()
+	return []byte(fmt.Sprintf(`"0x%x"`, n)), nil
 }
 
 // UnmarshalJSON implements json.Unmarshaler
 func (n *BlockNonce) UnmarshalJSON(input []byte) error {
-	return hexutil.UnmarshalJSON("BlockNonce", input, n[:])
+	var b hexBytes
+	if err := b.UnmarshalJSON(input); err != nil {
+		return err
+	}
+	if len(b) != 8 {
+		return errBadNonceSize
+	}
+	copy((*n)[:], b)
+	return nil
 }
 
-// Header represents a block header in the Ethereum blockchain.
+// Header represents Ethereum block headers.
 type Header struct {
 	ParentHash  common.Hash    // Hash to the previous block
 	UncleHash   common.Hash    // Uncles of this block
@@ -99,12 +106,12 @@ type jsonHeader struct {
 	TxHash      *common.Hash    `json:"transactionsRoot"`
 	ReceiptHash *common.Hash    `json:"receiptsRoot"`
 	Bloom       *Bloom          `json:"logsBloom"`
-	Difficulty  *hexutil.Big    `json:"difficulty"`
-	Number      *hexutil.Big    `json:"number"`
-	GasLimit    *hexutil.Big    `json:"gasLimit"`
-	GasUsed     *hexutil.Big    `json:"gasUsed"`
-	Time        *hexutil.Big    `json:"timestamp"`
-	Extra       *hexutil.Bytes  `json:"extraData"`
+	Difficulty  *hexBig         `json:"difficulty"`
+	Number      *hexBig         `json:"number"`
+	GasLimit    *hexBig         `json:"gasLimit"`
+	GasUsed     *hexBig         `json:"gasUsed"`
+	Time        *hexBig         `json:"timestamp"`
+	Extra       *hexBytes       `json:"extraData"`
 	MixDigest   *common.Hash    `json:"mixHash"`
 	Nonce       *BlockNonce     `json:"nonce"`
 }
@@ -134,6 +141,17 @@ func (h *Header) HashNoNonce() common.Hash {
 	})
 }
 
+// QuorumHash returns a RLP hash of header fields relevant to determine if
+// a block was created/signed by an authorized block maker.
+func (h *Header) QuorumHash() common.Hash {
+	return rlpHash([]interface{}{
+		h.ParentHash,
+		h.Coinbase,
+		h.Root,
+		h.Number,
+	})
+}
+
 // MarshalJSON encodes headers into the web3 RPC response block format.
 func (h *Header) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&jsonHeader{
@@ -144,12 +162,12 @@ func (h *Header) MarshalJSON() ([]byte, error) {
 		TxHash:      &h.TxHash,
 		ReceiptHash: &h.ReceiptHash,
 		Bloom:       &h.Bloom,
-		Difficulty:  (*hexutil.Big)(h.Difficulty),
-		Number:      (*hexutil.Big)(h.Number),
-		GasLimit:    (*hexutil.Big)(h.GasLimit),
-		GasUsed:     (*hexutil.Big)(h.GasUsed),
-		Time:        (*hexutil.Big)(h.Time),
-		Extra:       (*hexutil.Bytes)(&h.Extra),
+		Difficulty:  (*hexBig)(h.Difficulty),
+		Number:      (*hexBig)(h.Number),
+		GasLimit:    (*hexBig)(h.GasLimit),
+		GasUsed:     (*hexBig)(h.GasUsed),
+		Time:        (*hexBig)(h.Time),
+		Extra:       (*hexBytes)(&h.Extra),
 		MixDigest:   &h.MixDigest,
 		Nonce:       &h.Nonce,
 	})
@@ -207,7 +225,7 @@ type Body struct {
 	Uncles       []*Header
 }
 
-// Block represents an entire block in the Ethereum blockchain.
+// Block represents a block in the Ethereum blockchain.
 type Block struct {
 	header       *Header
 	uncles       []*Header
@@ -421,12 +439,24 @@ func CalcUncleHash(uncles []*Header) common.Hash {
 	return rlpHash(uncles)
 }
 
-// WithMiningResult returns a new block with the data from b
-// where nonce and mix digest are set to the provided values.
-func (b *Block) WithMiningResult(nonce BlockNonce, mixDigest common.Hash) *Block {
+// WithCoinbase returns a new block with the data from b
+// where coinbase is set to the provided value.
+func (b *Block) WithCoinbase(coinbase common.Address) *Block {
 	cpy := *b.header
-	cpy.Nonce = nonce
-	cpy.MixDigest = mixDigest
+	cpy.Coinbase.Set(coinbase)
+	return &Block{
+		header:       &cpy,
+		transactions: b.transactions,
+		uncles:       b.uncles,
+	}
+}
+
+// WithExtraData returns a new block with the data from b
+// where extraData is set to the provided value.
+func (b *Block) WithExtraData(extraData []byte) *Block {
+	cpy := *b.header
+	cpy.Extra = make([]byte, len(extraData))
+	copy(cpy.Extra, extraData)
 	return &Block{
 		header:       &cpy,
 		transactions: b.transactions,

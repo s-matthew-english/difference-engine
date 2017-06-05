@@ -26,10 +26,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/crypto/sha3"
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -75,7 +75,7 @@ func TestCalcDifficulty(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	config := &params.ChainConfig{HomesteadBlock: big.NewInt(1150000)}
+	config := &ChainConfig{HomesteadBlock: big.NewInt(1150000)}
 	for name, test := range tests {
 		number := new(big.Int).Sub(test.CurrentBlocknumber, big.NewInt(1))
 		diff := CalcDifficulty(config, test.CurrentTimestamp, test.ParentTimestamp, number, test.ParentDifficulty)
@@ -392,9 +392,9 @@ func TestReceiptStorage(t *testing.T) {
 	receipt1 := &types.Receipt{
 		PostState:         []byte{0x01},
 		CumulativeGasUsed: big.NewInt(1),
-		Logs: []*types.Log{
-			{Address: common.BytesToAddress([]byte{0x11})},
-			{Address: common.BytesToAddress([]byte{0x01, 0x11})},
+		Logs: vm.Logs{
+			&vm.Log{Address: common.BytesToAddress([]byte{0x11})},
+			&vm.Log{Address: common.BytesToAddress([]byte{0x01, 0x11})},
 		},
 		TxHash:          common.BytesToHash([]byte{0x11, 0x11}),
 		ContractAddress: common.BytesToAddress([]byte{0x01, 0x11, 0x11}),
@@ -403,9 +403,9 @@ func TestReceiptStorage(t *testing.T) {
 	receipt2 := &types.Receipt{
 		PostState:         []byte{0x02},
 		CumulativeGasUsed: big.NewInt(2),
-		Logs: []*types.Log{
-			{Address: common.BytesToAddress([]byte{0x22})},
-			{Address: common.BytesToAddress([]byte{0x02, 0x22})},
+		Logs: vm.Logs{
+			&vm.Log{Address: common.BytesToAddress([]byte{0x22})},
+			&vm.Log{Address: common.BytesToAddress([]byte{0x02, 0x22})},
 		},
 		TxHash:          common.BytesToHash([]byte{0x22, 0x22}),
 		ContractAddress: common.BytesToAddress([]byte{0x02, 0x22, 0x22}),
@@ -430,7 +430,7 @@ func TestReceiptStorage(t *testing.T) {
 			rlpHave, _ := rlp.EncodeToBytes(r)
 			rlpWant, _ := rlp.EncodeToBytes(receipt)
 
-			if !bytes.Equal(rlpHave, rlpWant) {
+			if bytes.Compare(rlpHave, rlpWant) != 0 {
 				t.Fatalf("receipt #%d [%x]: receipt mismatch: have %v, want %v", i, receipt.TxHash, r, receipt)
 			}
 		}
@@ -451,9 +451,9 @@ func TestBlockReceiptStorage(t *testing.T) {
 	receipt1 := &types.Receipt{
 		PostState:         []byte{0x01},
 		CumulativeGasUsed: big.NewInt(1),
-		Logs: []*types.Log{
-			{Address: common.BytesToAddress([]byte{0x11})},
-			{Address: common.BytesToAddress([]byte{0x01, 0x11})},
+		Logs: vm.Logs{
+			&vm.Log{Address: common.BytesToAddress([]byte{0x11})},
+			&vm.Log{Address: common.BytesToAddress([]byte{0x01, 0x11})},
 		},
 		TxHash:          common.BytesToHash([]byte{0x11, 0x11}),
 		ContractAddress: common.BytesToAddress([]byte{0x01, 0x11, 0x11}),
@@ -462,9 +462,9 @@ func TestBlockReceiptStorage(t *testing.T) {
 	receipt2 := &types.Receipt{
 		PostState:         []byte{0x02},
 		CumulativeGasUsed: big.NewInt(2),
-		Logs: []*types.Log{
-			{Address: common.BytesToAddress([]byte{0x22})},
-			{Address: common.BytesToAddress([]byte{0x02, 0x22})},
+		Logs: vm.Logs{
+			&vm.Log{Address: common.BytesToAddress([]byte{0x22})},
+			&vm.Log{Address: common.BytesToAddress([]byte{0x02, 0x22})},
 		},
 		TxHash:          common.BytesToHash([]byte{0x22, 0x22}),
 		ContractAddress: common.BytesToAddress([]byte{0x02, 0x22, 0x22}),
@@ -488,7 +488,7 @@ func TestBlockReceiptStorage(t *testing.T) {
 			rlpHave, _ := rlp.EncodeToBytes(rs[i])
 			rlpWant, _ := rlp.EncodeToBytes(receipts[i])
 
-			if !bytes.Equal(rlpHave, rlpWant) {
+			if bytes.Compare(rlpHave, rlpWant) != 0 {
 				t.Fatalf("receipt #%d: receipt mismatch: have %v, want %v", i, rs[i], receipts[i])
 			}
 		}
@@ -504,14 +504,14 @@ func TestMipmapBloom(t *testing.T) {
 	db, _ := ethdb.NewMemDatabase()
 
 	receipt1 := new(types.Receipt)
-	receipt1.Logs = []*types.Log{
-		{Address: common.BytesToAddress([]byte("test"))},
-		{Address: common.BytesToAddress([]byte("address"))},
+	receipt1.Logs = vm.Logs{
+		&vm.Log{Address: common.BytesToAddress([]byte("test"))},
+		&vm.Log{Address: common.BytesToAddress([]byte("address"))},
 	}
 	receipt2 := new(types.Receipt)
-	receipt2.Logs = []*types.Log{
-		{Address: common.BytesToAddress([]byte("test"))},
-		{Address: common.BytesToAddress([]byte("address1"))},
+	receipt2.Logs = vm.Logs{
+		&vm.Log{Address: common.BytesToAddress([]byte("test"))},
+		&vm.Log{Address: common.BytesToAddress([]byte("address1"))},
 	}
 
 	WriteMipmapBloom(db, 1, types.Receipts{receipt1})
@@ -527,14 +527,14 @@ func TestMipmapBloom(t *testing.T) {
 	// reset
 	db, _ = ethdb.NewMemDatabase()
 	receipt := new(types.Receipt)
-	receipt.Logs = []*types.Log{
-		{Address: common.BytesToAddress([]byte("test"))},
+	receipt.Logs = vm.Logs{
+		&vm.Log{Address: common.BytesToAddress([]byte("test"))},
 	}
 	WriteMipmapBloom(db, 999, types.Receipts{receipt1})
 
 	receipt = new(types.Receipt)
-	receipt.Logs = []*types.Log{
-		{Address: common.BytesToAddress([]byte("test 1"))},
+	receipt.Logs = vm.Logs{
+		&vm.Log{Address: common.BytesToAddress([]byte("test 1"))},
 	}
 	WriteMipmapBloom(db, 1000, types.Receipts{receipt})
 
@@ -562,17 +562,22 @@ func TestMipmapChain(t *testing.T) {
 	defer db.Close()
 
 	genesis := WriteGenesisBlockForTesting(db, GenesisAccount{addr, big.NewInt(1000000)})
-	chain, receipts := GenerateChain(params.TestChainConfig, genesis, db, 1010, func(i int, gen *BlockGen) {
+	chain, receipts := GenerateChain(nil, genesis, db, 1010, func(i int, gen *BlockGen) {
 		var receipts types.Receipts
 		switch i {
 		case 1:
 			receipt := types.NewReceipt(nil, new(big.Int))
-			receipt.Logs = []*types.Log{{Address: addr, Topics: []common.Hash{hash1}}}
+			receipt.Logs = vm.Logs{
+				&vm.Log{
+					Address: addr,
+					Topics:  []common.Hash{hash1},
+				},
+			}
 			gen.AddUncheckedReceipt(receipt)
 			receipts = types.Receipts{receipt}
 		case 1000:
 			receipt := types.NewReceipt(nil, new(big.Int))
-			receipt.Logs = []*types.Log{{Address: addr2}}
+			receipt.Logs = vm.Logs{&vm.Log{Address: addr2}}
 			gen.AddUncheckedReceipt(receipt)
 			receipts = types.Receipts{receipt}
 

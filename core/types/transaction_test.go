@@ -19,9 +19,10 @@ package types
 import (
 	"bytes"
 	"crypto/ecdsa"
-	"encoding/json"
 	"math/big"
+	"math/rand"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -30,6 +31,7 @@ import (
 
 // The values in those tests are from the Transaction Tests
 // at github.com/ethereum/tests.
+
 var (
 	emptyTx = NewTransaction(
 		0,
@@ -43,20 +45,19 @@ var (
 		common.HexToAddress("b94f5374fce5edbc8e2a8697c15331677e6ebf0b"),
 		big.NewInt(10),
 		big.NewInt(2000),
-		big.NewInt(1),
+		big.NewInt(0),
 		common.FromHex("5544"),
 	).WithSignature(
-		HomesteadSigner{},
-		common.Hex2Bytes("98ff921201554726367d2be8c804a7ff89ccf285ebc57dff8ae4c44b9c19ac4a8887321be575c8095f789dd4c743dfe42c1820f9231f98a962b210e3ac2452a301"),
+		common.Hex2Bytes("98ff921201554726367d2be8c804a7ff89ccf285ebc57dff8ae4c44b9c19ac4a8887321be575c8095f789dd4c743dfe42c1820f9231f98a962b210e3ac2452a31c"),
 	)
 )
 
 func TestTransactionSigHash(t *testing.T) {
-	if emptyTx.SigHash(HomesteadSigner{}) != common.HexToHash("c775b99e7ad12f50d819fcd602390467e28141316969f4b57f0626f74fe3b386") {
+	if emptyTx.SigHash() != common.HexToHash("c775b99e7ad12f50d819fcd602390467e28141316969f4b57f0626f74fe3b386") {
 		t.Errorf("empty transaction hash mismatch, got %x", emptyTx.Hash())
 	}
-	if rightvrsTx.SigHash(HomesteadSigner{}) != common.HexToHash("fe7a79529ed5f7c3375d06b26b186a8644e0e16c373d7a12be41c62d6042b77a") {
-		t.Errorf("RightVRS transaction hash mismatch, got %x", rightvrsTx.Hash())
+	if rightvrsTx.SigHash() != common.HexToHash("c75e06c2a1b4e254e869653871436fdfa752fd613152b474e6dd36b73a13dae2") {
+		t.Errorf("RightVRS transaction hash mismatch, got %x", rightvrsTx.SigHash())
 	}
 }
 
@@ -65,7 +66,7 @@ func TestTransactionEncode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode error: %v", err)
 	}
-	should := common.FromHex("f86103018207d094b94f5374fce5edbc8e2a8697c15331677e6ebf0b0a8255441ca098ff921201554726367d2be8c804a7ff89ccf285ebc57dff8ae4c44b9c19ac4aa08887321be575c8095f789dd4c743dfe42c1820f9231f98a962b210e3ac2452a3")
+	should := common.FromHex("f86103808207d094b94f5374fce5edbc8e2a8697c15331677e6ebf0b0a8255441ca098ff921201554726367d2be8c804a7ff89ccf285ebc57dff8ae4c44b9c19ac4aa08887321be575c8095f789dd4c743dfe42c1820f9231f98a962b210e3ac2452a3")
 	if !bytes.Equal(txb, should) {
 		t.Errorf("encoded RLP mismatch, got %x", txb)
 	}
@@ -73,9 +74,7 @@ func TestTransactionEncode(t *testing.T) {
 
 func decodeTx(data []byte) (*Transaction, error) {
 	var tx Transaction
-	t, err := &tx, rlp.Decode(bytes.NewReader(data), &tx)
-
-	return t, err
+	return &tx, rlp.Decode(bytes.NewReader(data), &tx)
 }
 
 func defaultTestKey() (*ecdsa.PrivateKey, common.Address) {
@@ -91,8 +90,7 @@ func TestRecipientEmpty(t *testing.T) {
 		t.Error(err)
 		t.FailNow()
 	}
-
-	from, err := Sender(HomesteadSigner{}, tx)
+	from, err := tx.From()
 	if err != nil {
 		t.Error(err)
 		t.FailNow()
@@ -111,7 +109,7 @@ func TestRecipientNormal(t *testing.T) {
 		t.FailNow()
 	}
 
-	from, err := Sender(HomesteadSigner{}, tx)
+	from, err := tx.From()
 	if err != nil {
 		t.Error(err)
 		t.FailNow()
@@ -119,6 +117,92 @@ func TestRecipientNormal(t *testing.T) {
 
 	if addr != from {
 		t.Error("derived address doesn't match")
+	}
+}
+
+func TestTransactionsByPriorityNonceSort(t *testing.T) {
+	votingContractAddr := common.HexToAddress("0x0000000000000000000000000000000000000020")
+
+	// Generate a batch of accounts to start with
+	keys := make([]*ecdsa.PrivateKey, 50)
+	for i := 0; i < len(keys); i++ {
+		keys[i], _ = crypto.GenerateKey()
+	}
+
+	// Generate a batch of transactions with overlapping values, but shifted nonces
+	groups := map[common.Address]Transactions{}
+
+	rand.Seed(time.Now().UnixNano())
+	for start, key := range keys {
+		addr := crypto.PubkeyToAddress(key.PublicKey)
+		for i := 0; i < 5; i++ {
+			var tx *Transaction
+			switch rand.Int() % 3 {
+			case 0:
+				tx, _ = NewTransaction(uint64(i), votingContractAddr, big.NewInt(100), big.NewInt(100), big.NewInt(int64(start+1)), nil).SignECDSA(key)
+			case 1:
+				tx, _ = NewTransaction(uint64(i), common.Address{}, big.NewInt(100), big.NewInt(100), big.NewInt(int64(start+1)), nil).SignECDSA(key)
+			default:
+				tx, _ = NewContractCreation(uint64(i), common.Big0, common.MaxBig, common.Big0, []byte{0}).SignECDSA(key)
+			}
+
+			groups[addr] = append(groups[addr], tx)
+		}
+	}
+
+	txset := NewTransactionsByPriorityAndNonce(groups)
+
+	txs := Transactions{}
+	for {
+		if tx := txset.Peek(); tx != nil {
+			txs = append(txs, tx)
+			txset.Shift()
+		} else {
+			break
+		}
+	}
+
+	for i, txi := range txs {
+		fromi, _ := txi.From()
+
+		// Make sure the nonce order is valid
+		for j, txj := range txs[i+1:] {
+			fromj, _ := txj.From()
+			if fromi == fromj && txi.Nonce() > txj.Nonce() {
+				t.Errorf("invalid nonce ordering: tx #%d (A=%x N=%v) < tx #%d (A=%x N=%v)", i, fromi[:4], txi.Nonce(), i+j, fromj[:4], txj.Nonce())
+			}
+		}
+	}
+
+	// first first non prioritised transaction
+	index := 0
+	for i, tx := range txs {
+		// search first non prioritized transaction
+		to := tx.To()
+		if to != nil && *to != votingContractAddr {
+			index = i
+			break
+		}
+	}
+
+	// ensure that all transaction after this point are non-prioritized
+	gotNonPrioritised := make(map[common.Address]bool)
+	for i, tx := range txs[index:] {
+		from, _ := tx.From()
+
+		if _, ok := gotNonPrioritised[from]; ok { // got an non-prioritised before this one which, this tx is always good
+			continue
+		} else { // didn't got a non-prioritised tx before this one, ensure this tx has no priority
+			to := tx.To()
+			if to != nil && *to == votingContractAddr {
+				for n, trans := range txs {
+					transFrom, _ := trans.From()
+					t.Logf("Tx[%d] nonce: %d, from: %x, to: %x", n, trans.Nonce(), transFrom, trans.To())
+				}
+				t.Fatalf("Found a priority tx on index %d that hasn't got no priority is should have", index+i)
+			}
+			gotNonPrioritised[from] = true
+		}
 	}
 }
 
@@ -131,14 +215,12 @@ func TestTransactionPriceNonceSort(t *testing.T) {
 	for i := 0; i < len(keys); i++ {
 		keys[i], _ = crypto.GenerateKey()
 	}
-
-	signer := HomesteadSigner{}
 	// Generate a batch of transactions with overlapping values, but shifted nonces
 	groups := map[common.Address]Transactions{}
 	for start, key := range keys {
 		addr := crypto.PubkeyToAddress(key.PublicKey)
 		for i := 0; i < 25; i++ {
-			tx, _ := SignTx(NewTransaction(uint64(start+i), common.Address{}, big.NewInt(100), big.NewInt(100), big.NewInt(int64(start+i)), nil), signer, key)
+			tx, _ := NewTransaction(uint64(start+i), common.Address{}, big.NewInt(100), big.NewInt(100), big.NewInt(int64(start+i)), nil).SignECDSA(key)
 			groups[addr] = append(groups[addr], tx)
 		}
 	}
@@ -150,15 +232,16 @@ func TestTransactionPriceNonceSort(t *testing.T) {
 		if tx := txset.Peek(); tx != nil {
 			txs = append(txs, tx)
 			txset.Shift()
+		} else {
+			break
 		}
-		break
 	}
 	for i, txi := range txs {
-		fromi, _ := Sender(signer, txi)
+		fromi, _ := txi.From()
 
 		// Make sure the nonce order is valid
 		for j, txj := range txs[i+1:] {
-			fromj, _ := Sender(signer, txj)
+			fromj, _ := txj.From()
 
 			if fromi == fromj && txi.Nonce() > txj.Nonce() {
 				t.Errorf("invalid nonce ordering: tx #%d (A=%x N=%v) < tx #%d (A=%x N=%v)", i, fromi[:4], txi.Nonce(), i+j, fromj[:4], txj.Nonce())
@@ -167,68 +250,26 @@ func TestTransactionPriceNonceSort(t *testing.T) {
 		// Find the previous and next nonce of this account
 		prev, next := i-1, i+1
 		for j := i - 1; j >= 0; j-- {
-			if fromj, _ := Sender(signer, txs[j]); fromi == fromj {
+			if fromj, _ := txs[j].From(); fromi == fromj {
 				prev = j
 				break
 			}
 		}
 		for j := i + 1; j < len(txs); j++ {
-			if fromj, _ := Sender(signer, txs[j]); fromi == fromj {
+			if fromj, _ := txs[j].From(); fromi == fromj {
 				next = j
 				break
 			}
 		}
 		// Make sure that in between the neighbor nonces, the transaction is correctly positioned price wise
 		for j := prev + 1; j < next; j++ {
-			fromj, _ := Sender(signer, txs[j])
+			fromj, _ := txs[j].From()
 			if j < i && txs[j].GasPrice().Cmp(txi.GasPrice()) < 0 {
 				t.Errorf("invalid gasprice ordering: tx #%d (A=%x P=%v) < tx #%d (A=%x P=%v)", j, fromj[:4], txs[j].GasPrice(), i, fromi[:4], txi.GasPrice())
 			}
 			if j > i && txs[j].GasPrice().Cmp(txi.GasPrice()) > 0 {
 				t.Errorf("invalid gasprice ordering: tx #%d (A=%x P=%v) > tx #%d (A=%x P=%v)", j, fromj[:4], txs[j].GasPrice(), i, fromi[:4], txi.GasPrice())
 			}
-		}
-	}
-}
-
-// TestTransactionJSON tests serializing/de-serializing to/from JSON.
-func TestTransactionJSON(t *testing.T) {
-	key, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatalf("could not generate key: %v", err)
-	}
-	signer := NewEIP155Signer(common.Big1)
-
-	for i := uint64(0); i < 25; i++ {
-		var tx *Transaction
-		switch i % 2 {
-		case 0:
-			tx = NewTransaction(i, common.Address{1}, common.Big0, common.Big1, common.Big2, []byte("abcdef"))
-		case 1:
-			tx = NewContractCreation(i, common.Big0, common.Big1, common.Big2, []byte("abcdef"))
-		}
-
-		tx, err := SignTx(tx, signer, key)
-		if err != nil {
-			t.Fatalf("could not sign transaction: %v", err)
-		}
-
-		data, err := json.Marshal(tx)
-		if err != nil {
-			t.Errorf("json.Marshal failed: %v", err)
-		}
-
-		var parsedTx *Transaction
-		if err := json.Unmarshal(data, &parsedTx); err != nil {
-			t.Errorf("json.Unmarshal failed: %v", err)
-		}
-
-		// compare nonce, price, gaslimit, recipient, amount, payload, V, R, S
-		if tx.Hash() != parsedTx.Hash() {
-			t.Errorf("parsed tx differs from original tx, want %v, got %v", tx, parsedTx)
-		}
-		if tx.ChainId().Cmp(parsedTx.ChainId()) != 0 {
-			t.Errorf("invalid chain id, want %d, got %d", tx.ChainId(), parsedTx.ChainId())
 		}
 	}
 }

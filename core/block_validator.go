@@ -24,16 +24,26 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/pow"
 	"gopkg.in/fatih/set.v0"
 )
+
+func forceParseRfc3339(str string) time.Time {
+	time, err := time.Parse(time.RFC3339, str)
+	if err != nil {
+		panic("unexpected failure to parse rfc3339 timestamp: " + str)
+	}
+	return time
+}
 
 var (
 	ExpDiffPeriod = big.NewInt(100000)
 	big10         = big.NewInt(10)
 	bigMinus99    = big.NewInt(-99)
+	nanosecond2017Timestamp = forceParseRfc3339("2017-01-01T00:00:00+00:00").UnixNano()
 )
 
 // BlockValidator is responsible for validating block headers, uncles and
@@ -41,17 +51,19 @@ var (
 //
 // BlockValidator implements Validator.
 type BlockValidator struct {
-	config *params.ChainConfig // Chain configuration options
-	bc     *BlockChain         // Canonical block chain
-	Pow    pow.PoW             // Proof of work used for validating
+	chaindb            ethdb.Database
+	config             *ChainConfig // Chain configuration options
+	bc                 *BlockChain  // Canonical block chain
+	enableQuorumChecks bool         // indication if the signature and vote count is checked (disabled for testing puposes)
 }
 
 // NewBlockValidator returns a new block validator which is safe for re-use
-func NewBlockValidator(config *params.ChainConfig, blockchain *BlockChain, pow pow.PoW) *BlockValidator {
+func NewBlockValidator(chaindb ethdb.Database, config *ChainConfig, blockchain *BlockChain, enableQuorumChecks bool) *BlockValidator {
 	validator := &BlockValidator{
-		config: config,
-		Pow:    pow,
-		bc:     blockchain,
+		chaindb:            chaindb,
+		config:             config,
+		bc:                 blockchain,
+		enableQuorumChecks: enableQuorumChecks,
 	}
 	return validator
 }
@@ -59,12 +71,12 @@ func NewBlockValidator(config *params.ChainConfig, blockchain *BlockChain, pow p
 // ValidateBlock validates the given block's header and uncles and verifies the
 // the block header's transaction and uncle roots.
 //
-// ValidateBlock does not validate the header's pow. The pow work validated
+// ValidateBlock does not validate the header's finaliser. The finaliser work validated
 // separately so we can process them in parallel.
 //
 // ValidateBlock also validates and makes sure that any previous state (or present)
 // state that might or might not be present is checked to make sure that fast
-// sync has done it's job proper. This prevents the block validator from accepting
+// sync has done it's job proper. This prevents the block validator form accepting
 // false positives where a header is present but the state is not.
 func (v *BlockValidator) ValidateBlock(block *types.Block) error {
 	if v.bc.HasBlock(block.Hash()) {
@@ -82,7 +94,7 @@ func (v *BlockValidator) ValidateBlock(block *types.Block) error {
 
 	header := block.Header()
 	// validate the block header
-	if err := ValidateHeader(v.config, v.Pow, header, parent.Header(), false, false); err != nil {
+	if err := ValidateHeader(v.chaindb, v.bc, v.config, header, parent.Header(), false, v.enableQuorumChecks); err != nil {
 		return err
 	}
 	// verify the uncles are correctly rewarded
@@ -93,44 +105,103 @@ func (v *BlockValidator) ValidateBlock(block *types.Block) error {
 	// Verify UncleHash before running other uncle validations
 	unclesSha := types.CalcUncleHash(block.Uncles())
 	if unclesSha != header.UncleHash {
-		return fmt.Errorf("invalid uncles root hash (remote: %x local: %x)", header.UncleHash, unclesSha)
+		return fmt.Errorf("invalid uncles root hash. received=%x calculated=%x", header.UncleHash, unclesSha)
 	}
 
 	// The transactions Trie's root (R = (Tr [[i, RLP(T1)], [i, RLP(T2)], ... [n, RLP(Tn)]]))
 	// can be used by light clients to make sure they've received the correct Txs
 	txSha := types.DeriveSha(block.Transactions())
 	if txSha != header.TxHash {
-		return fmt.Errorf("invalid transaction root hash (remote: %x local: %x)", header.TxHash, txSha)
+		return fmt.Errorf("invalid transaction root hash. received=%x calculated=%x", header.TxHash, txSha)
 	}
 
 	return nil
 }
 
+// callmsg is the message type used for call transactions.
+type callmsg struct {
+	from          *state.StateObject
+	to            *common.Address
+	gas, gasPrice *big.Int
+	value         *big.Int
+	data          []byte
+}
+
+// accessor boilerplate to implement core.Message
+func (m callmsg) From() (common.Address, error)         { return m.from.Address(), nil }
+func (m callmsg) FromFrontier() (common.Address, error) { return m.from.Address(), nil }
+func (m callmsg) Nonce() uint64                         { return m.from.Nonce() }
+func (m callmsg) To() *common.Address                   { return m.to }
+func (m callmsg) GasPrice() *big.Int                    { return m.gasPrice }
+func (m callmsg) Gas() *big.Int                         { return m.gas }
+func (m callmsg) Value() *big.Int                       { return m.value }
+func (m callmsg) Data() []byte                          { return m.data }
+func (m callmsg) CheckNonce() bool                      { return true }
+
 // ValidateState validates the various changes that happen after a state
 // transition, such as amount of used gas, the receipt roots and the state root
-// itself. ValidateState returns a database batch if the validation was a success
+// itself. For quorum it also verifies if the canonical hash in the blocks state
+// points to a valid parent hash.
+//
+// ValidateState returns a database batch if the validation was a success
 // otherwise nil and an error is returned.
 func (v *BlockValidator) ValidateState(block, parent *types.Block, statedb *state.StateDB, receipts types.Receipts, usedGas *big.Int) (err error) {
 	header := block.Header()
 	if block.GasUsed().Cmp(usedGas) != 0 {
-		return ValidationError(fmt.Sprintf("invalid gas used (remote: %v local: %v)", block.GasUsed(), usedGas))
+		return ValidationError(fmt.Sprintf("gas used error (%v / %v)", block.GasUsed(), usedGas))
 	}
 	// Validate the received block's bloom with the one derived from the generated receipts.
 	// For valid blocks this should always validate to true.
 	rbloom := types.CreateBloom(receipts)
 	if rbloom != header.Bloom {
-		return fmt.Errorf("invalid bloom (remote: %x  local: %x)", header.Bloom, rbloom)
+		return fmt.Errorf("unable to replicate block's bloom=%x vs calculated bloom=%x", header.Bloom, rbloom)
 	}
 	// Tre receipt Trie's root (R = (Tr [[H1, R1], ... [Hn, R1]]))
 	receiptSha := types.DeriveSha(receipts)
 	if receiptSha != header.ReceiptHash {
-		return fmt.Errorf("invalid receipt root hash (remote: %x local: %x)", header.ReceiptHash, receiptSha)
+		return fmt.Errorf("invalid receipt root hash. received=%x calculated=%x", header.ReceiptHash, receiptSha)
 	}
+
 	// Validate the state root against the received state root and throw
 	// an error if they don't match.
-	if root := statedb.IntermediateRoot(v.config.IsEIP158(header.Number)); header.Root != root {
-		return fmt.Errorf("invalid merkle root (remote: %x local: %x)", header.Root, root)
+	if root := statedb.IntermediateRoot(); header.Root != root {
+		return fmt.Errorf("invalid merkle root: header=%x computed=%x", header.Root, root)
 	}
+
+	if v.enableQuorumChecks {
+		// Ensure that the parent block was indeed the one that was voted for in the state of this block.
+		// The contract enforces that there are enough votes and only votes from parties that are allowed to vote.
+		var (
+			gp        = new(GasPool).AddGas(common.MaxBig)
+			to        = common.HexToAddress("0x0000000000000000000000000000000000000020")
+			stateCopy = statedb.Copy()
+			msg       = callmsg{
+				from:     stateCopy.GetOrNewStateObject(common.HexToAddress("0x0000000000000000000000000000000000000000")),
+				to:       &to,
+				gas:      big.NewInt(500000),
+				gasPrice: common.Big0,
+				value:    common.Big0,
+				data:     common.Hex2Bytes(fmt.Sprintf("559c390c%064x", block.Number())), // call getCanonHash(uint256)
+			}
+			vmenv = NewEnv(stateCopy, stateCopy, v.config, v.bc, msg, block.Header(), v.config.VmConfig)
+		)
+
+		result, _, _, err := NewStateTransition(vmenv, msg, gp).TransitionDb()
+		if err != nil {
+			return err
+		}
+
+		// result holds the hash that was the winning hash according the voting contract
+		parentHash := common.BytesToHash(result)
+		if parentHash == (common.Hash{}) {
+			// too little votes
+			return fmt.Errorf("block parent could not be verified, ignore block (%d)", block.Number())
+		}
+		if block.ParentHash() != parentHash {
+			return fmt.Errorf("build on top of unexpected parent, expected %s, got %s", parentHash.Hex(), block.ParentHash().Hex())
+		}
+	}
+
 	return nil
 }
 
@@ -139,7 +210,7 @@ func (v *BlockValidator) ValidateState(block, parent *types.Block, statedb *stat
 // error if any of the included uncle headers were invalid. It returns an error
 // if the validation failed.
 func (v *BlockValidator) VerifyUncles(block, parent *types.Block) error {
-	// validate that there are at most 2 uncles included in this block
+	// validate that there at most 2 uncles included in this block
 	if len(block.Uncles()) > 2 {
 		return ValidationError("Block can only contain maximum 2 uncles (contained %v)", len(block.Uncles()))
 	}
@@ -177,7 +248,7 @@ func (v *BlockValidator) VerifyUncles(block, parent *types.Block) error {
 			return UncleError("uncle[%d](%x)'s parent is not ancestor (%x)", i, hash[:4], uncle.ParentHash[0:4])
 		}
 
-		if err := ValidateHeader(v.config, v.Pow, uncle, ancestors[uncle.ParentHash].Header(), true, true); err != nil {
+		if err := ValidateHeader(v.chaindb, v.bc, v.config, uncle, ancestors[uncle.ParentHash].Header(), true, v.enableQuorumChecks); err != nil {
 			return ValidationError(fmt.Sprintf("uncle[%d](%x) header invalid: %v", i, hash[:4], err))
 		}
 	}
@@ -185,25 +256,26 @@ func (v *BlockValidator) VerifyUncles(block, parent *types.Block) error {
 	return nil
 }
 
-// ValidateHeader validates the given header and, depending on the pow arg,
+// ValidateHeader validates the given header and, depending on the finaliser arg,
 // checks the proof of work of the given header. Returns an error if the
 // validation failed.
-func (v *BlockValidator) ValidateHeader(header, parent *types.Header, checkPow bool) error {
+func (v *BlockValidator) ValidateHeader(chaindb ethdb.Database, header, parent *types.Header) error {
 	// Short circuit if the parent is missing.
 	if parent == nil {
 		return ParentError(header.ParentHash)
 	}
-	// Short circuit if the header's already known or its parent is missing
+	// Short circuit if the header's already known or its parent missing
 	if v.bc.HasHeader(header.Hash()) {
 		return nil
 	}
-	return ValidateHeader(v.config, v.Pow, header, parent, checkPow, false)
+	return ValidateHeader(chaindb, v.bc, v.config, header, parent, false, v.enableQuorumChecks)
 }
 
-// Validates a header. Returns an error if the header is invalid.
+// Validates a header. Returns an error if the header is invalid and verify if the
+// block signature is from an allowed block creator.
 //
 // See YP section 4.3.4. "Block Header Validity"
-func ValidateHeader(config *params.ChainConfig, pow pow.PoW, header *types.Header, parent *types.Header, checkPow, uncle bool) error {
+func ValidateHeader(chaindb ethdb.Database, bc *BlockChain, config *ChainConfig, header *types.Header, parent *types.Header, uncle, validateSignature bool) error {
 	if big.NewInt(int64(len(header.Extra))).Cmp(params.MaximumExtraDataSize) == 1 {
 		return fmt.Errorf("Header extra data too long (%d)", len(header.Extra))
 	}
@@ -213,8 +285,20 @@ func ValidateHeader(config *params.ChainConfig, pow pow.PoW, header *types.Heade
 			return BlockTSTooBigErr
 		}
 	} else {
-		if header.Time.Cmp(big.NewInt(time.Now().Unix())) == 1 {
-			return BlockFutureErr
+		// We disable future checking if we're in --raft mode. This is crucial
+		// because block validation in the raft setting needs to be deterministic.
+		// There is no forking of the chain, and we need each node to only perform
+		// validation as a pure function of block contents with respect to the
+		// previous database state.
+		//
+		// NOTE: whereas we are currently checking whether the timestamp field has
+		// nanosecond semantics to detect --raft mode, we could also use a special
+		// "raft" sentinel in the Extra field, or pass a boolean for raftMode from
+		// all call sites of this function.
+		if raftMode := time.Now().UnixNano() > nanosecond2017Timestamp; !raftMode {
+			if header.Time.Cmp(big.NewInt(time.Now().Unix())) == 1 {
+				return BlockFutureErr
+			}
 		}
 	}
 	if header.Time.Cmp(parent.Time) != 1 {
@@ -223,7 +307,7 @@ func ValidateHeader(config *params.ChainConfig, pow pow.PoW, header *types.Heade
 
 	expd := CalcDifficulty(config, header.Time.Uint64(), parent.Time.Uint64(), parent.Number, parent.Difficulty)
 	if expd.Cmp(header.Difficulty) != 0 {
-		return fmt.Errorf("Difficulty check failed for header (remote: %v local: %v)", header.Difficulty, expd)
+		return fmt.Errorf("Difficulty check failed for header %v, %v", header.Difficulty, expd)
 	}
 
 	a := new(big.Int).Set(parent.GasLimit)
@@ -232,7 +316,7 @@ func ValidateHeader(config *params.ChainConfig, pow pow.PoW, header *types.Heade
 	b := new(big.Int).Set(parent.GasLimit)
 	b = b.Div(b, params.GasLimitBoundDivisor)
 	if !(a.Cmp(b) < 0) || (header.GasLimit.Cmp(params.MinGasLimit) == -1) {
-		return fmt.Errorf("GasLimit check failed for header (remote: %v local_max: %v)", header.GasLimit, b)
+		return fmt.Errorf("GasLimit check failed for header %v (%v > %v)", header.GasLimit, a, b)
 	}
 
 	num := new(big.Int).Set(parent.Number)
@@ -241,28 +325,71 @@ func ValidateHeader(config *params.ChainConfig, pow pow.PoW, header *types.Heade
 		return BlockNumberErr
 	}
 
-	if checkPow {
-		// Verify the nonce of the header. Return an error if it's not valid
-		if !pow.Verify(types.NewBlockWithHeader(header)) {
-			return &BlockNonceErr{header.Number, header.Hash(), header.Nonce.Uint64()}
-		}
-	}
-	// If all checks passed, validate the extra-data field for hard forks
-	if err := ValidateDAOHeaderExtraData(config, header); err != nil {
-		return err
-	}
-	if !uncle && config.EIP150Block != nil && config.EIP150Block.Cmp(header.Number) == 0 {
-		if config.EIP150Hash != (common.Hash{}) && config.EIP150Hash != header.Hash() {
-			return ValidationError("Homestead gas reprice fork hash mismatch: have 0x%x, want 0x%x", header.Hash(), config.EIP150Hash)
-		}
+	if validateSignature {
+		return ValidateExtraData(chaindb, bc, config, parent, header)
 	}
 	return nil
+}
+
+// ValidateExtraData verifies the signature in the extra data field and ensures the signer is allowed to create blocks.
+//
+// In Quorum blocks the Extra data field contains a signature created by the block creator.
+// This signature is used to verify that the block is created by a party that is allowed to create blocks.
+func ValidateExtraData(chaindb ethdb.Database, bc *BlockChain, config *ChainConfig, parent, header *types.Header) error {
+	var (
+		hash      = header.QuorumHash()
+		signature = header.Extra
+		addr      = header.Coinbase
+	)
+
+	pubKey, err := crypto.SigToPub(hash.Bytes(), signature)
+	if err != nil {
+		return err
+	}
+
+	signerAddr := crypto.PubkeyToAddress(*pubKey)
+	if signerAddr != addr {
+		return fmt.Errorf("invalid header signature %s != %s", signerAddr.Hex(), addr.Hex())
+	}
+
+	// Ensure that the recovered address belongs to an account this is allowed to create blocks.
+	var (
+		state, _ = state.New(parent.Root, chaindb)
+		gp       = new(GasPool).AddGas(common.MaxBig)
+		to       = common.HexToAddress("0x0000000000000000000000000000000000000020")
+		msg      = callmsg{
+			from:     state.GetOrNewStateObject(common.HexToAddress("0x0000000000000000000000000000000000000000")),
+			to:       &to,
+			gas:      big.NewInt(500000),
+			gasPrice: common.Big0,
+			value:    common.Big0,
+			data:     common.Hex2Bytes(fmt.Sprintf("e814d1c7%064x", signerAddr.Bytes())), // call isBlockMaker(address)
+		}
+		vmenv = NewEnv(state, state, config, bc, msg, header, config.VmConfig)
+	)
+
+	result, _, _, err := NewStateTransition(vmenv, msg, gp).TransitionDb()
+	if err != nil {
+		return err
+	}
+
+	if config.HomesteadGasRepriceBlock != nil && config.HomesteadGasRepriceBlock.Cmp(header.Number) == 0 {
+		if config.HomesteadGasRepriceHash != (common.Hash{}) && config.HomesteadGasRepriceHash != header.Hash() {
+			return ValidationError("Homestead gas reprice fork hash mismatch: have 0x%x, want 0x%x", header.Hash(), config.HomesteadGasRepriceHash)
+		}
+	}
+
+	if new(big.Int).SetBytes(result).Cmp(common.Big1) == 0 {
+		return nil
+	}
+
+	return fmt.Errorf("Invalid header: %s isn't allowed to create blocks", signerAddr.Hex())
 }
 
 // CalcDifficulty is the difficulty adjustment algorithm. It returns
 // the difficulty that a new block should have when created at time
 // given the parent block's time and difficulty.
-func CalcDifficulty(config *params.ChainConfig, time, parentTime uint64, parentNumber, parentDiff *big.Int) *big.Int {
+func CalcDifficulty(config *ChainConfig, time, parentTime uint64, parentNumber, parentDiff *big.Int) *big.Int {
 	if config.IsHomestead(new(big.Int).Add(parentNumber, common.Big1)) {
 		return calcDifficultyHomestead(time, parentTime, parentNumber, parentDiff)
 	} else {
@@ -354,7 +481,7 @@ func calcDifficultyFrontier(time, parentTime uint64, parentNumber, parentDiff *b
 // The result may be modified by the caller.
 // This is miner strategy, not consensus protocol.
 func CalcGasLimit(parent *types.Block) *big.Int {
-	// contrib = (parentGasUsed * 3 / 2) / 1024
+	// contrib = (parentGasUsed * 3 / 2) / 4096
 	contrib := new(big.Int).Mul(parent.GasUsed(), big.NewInt(3))
 	contrib = contrib.Div(contrib, big.NewInt(2))
 	contrib = contrib.Div(contrib, params.GasLimitBoundDivisor)

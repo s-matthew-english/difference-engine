@@ -24,7 +24,6 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -34,6 +33,10 @@ import (
 	"github.com/ethereum/go-ethereum/trie"
 	lru "github.com/hashicorp/golang-lru"
 )
+
+// The starting nonce determines the default nonce when new accounts are being
+// created.
+var StartingNonce uint64
 
 // Trie cache generation limit after which to evic trie nodes from memory.
 var MaxTrieCacheGen = uint16(120)
@@ -72,10 +75,8 @@ type StateDB struct {
 
 	thash, bhash common.Hash
 	txIndex      int
-	logs         map[common.Hash][]*types.Log
+	logs         map[common.Hash]vm.Logs
 	logSize      uint
-
-	preimages map[common.Hash][]byte
 
 	// Journal of state modifications. This is the backbone of
 	// Snapshot and RevertToSnapshot.
@@ -100,8 +101,7 @@ func New(root common.Hash, db ethdb.Database) (*StateDB, error) {
 		stateObjects:      make(map[common.Address]*StateObject),
 		stateObjectsDirty: make(map[common.Address]struct{}),
 		refund:            new(big.Int),
-		logs:              make(map[common.Hash][]*types.Log),
-		preimages:         make(map[common.Hash][]byte),
+		logs:              make(map[common.Hash]vm.Logs),
 	}, nil
 }
 
@@ -122,8 +122,7 @@ func (self *StateDB) New(root common.Hash) (*StateDB, error) {
 		stateObjects:      make(map[common.Address]*StateObject),
 		stateObjectsDirty: make(map[common.Address]struct{}),
 		refund:            new(big.Int),
-		logs:              make(map[common.Hash][]*types.Log),
-		preimages:         make(map[common.Hash][]byte),
+		logs:              make(map[common.Hash]vm.Logs),
 	}, nil
 }
 
@@ -143,9 +142,8 @@ func (self *StateDB) Reset(root common.Hash) error {
 	self.thash = common.Hash{}
 	self.bhash = common.Hash{}
 	self.txIndex = 0
-	self.logs = make(map[common.Hash][]*types.Log)
+	self.logs = make(map[common.Hash]vm.Logs)
 	self.logSize = 0
-	self.preimages = make(map[common.Hash][]byte)
 	self.clearJournalAndRefund()
 
 	return nil
@@ -181,7 +179,7 @@ func (self *StateDB) StartRecord(thash, bhash common.Hash, ti int) {
 	self.txIndex = ti
 }
 
-func (self *StateDB) AddLog(log *types.Log) {
+func (self *StateDB) AddLog(log *vm.Log) {
 	self.journal = append(self.journal, addLogChange{txhash: self.thash})
 
 	log.TxHash = self.thash
@@ -192,31 +190,16 @@ func (self *StateDB) AddLog(log *types.Log) {
 	self.logSize++
 }
 
-func (self *StateDB) GetLogs(hash common.Hash) []*types.Log {
+func (self *StateDB) GetLogs(hash common.Hash) vm.Logs {
 	return self.logs[hash]
 }
 
-func (self *StateDB) Logs() []*types.Log {
-	var logs []*types.Log
+func (self *StateDB) Logs() vm.Logs {
+	var logs vm.Logs
 	for _, lgs := range self.logs {
 		logs = append(logs, lgs...)
 	}
 	return logs
-}
-
-// AddPreimage records a SHA3 preimage seen by the VM.
-func (self *StateDB) AddPreimage(hash common.Hash, preimage []byte) {
-	if _, ok := self.preimages[hash]; !ok {
-		self.journal = append(self.journal, addPreimageChange{hash: hash})
-		pi := make([]byte, len(preimage))
-		copy(pi, preimage)
-		self.preimages[hash] = pi
-	}
-}
-
-// Preimages returns a list of SHA3 preimages that have been submitted.
-func (self *StateDB) Preimages() map[common.Hash][]byte {
-	return self.preimages
 }
 
 func (self *StateDB) AddRefund(gas *big.Int) {
@@ -228,13 +211,6 @@ func (self *StateDB) AddRefund(gas *big.Int) {
 // Notably this also returns true for suicided accounts.
 func (self *StateDB) Exist(addr common.Address) bool {
 	return self.GetStateObject(addr) != nil
-}
-
-// Empty returns whether the state object is either non-existent
-// or empty according to the EIP161 specification (balance = nonce = code = 0)
-func (self *StateDB) Empty(addr common.Address) bool {
-	so := self.GetStateObject(addr)
-	return so == nil || so.empty()
 }
 
 func (self *StateDB) GetAccount(addr common.Address) vm.Account {
@@ -256,7 +232,7 @@ func (self *StateDB) GetNonce(addr common.Address) uint64 {
 		return stateObject.Nonce()
 	}
 
-	return 0
+	return StartingNonce
 }
 
 func (self *StateDB) GetCode(addr common.Address) []byte {
@@ -310,23 +286,23 @@ func (self *StateDB) HasSuicided(addr common.Address) bool {
 	return false
 }
 
+// GetStorageRoot returns the root of the storage associated with the given address.
+func (self *StateDB) GetStorageRoot(addr common.Address) (common.Hash, error) {
+	so := self.GetStateObject(addr)
+	if so == nil {
+		return common.Hash{}, fmt.Errorf("can't find state object")
+	}
+	return so.storageRoot(self.db), nil
+}
+
 /*
  * SETTERS
  */
 
-// AddBalance adds amount to the account associated with addr
 func (self *StateDB) AddBalance(addr common.Address, amount *big.Int) {
 	stateObject := self.GetOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject.AddBalance(amount)
-	}
-}
-
-// SubBalance subtracts amount from the account associated with addr
-func (self *StateDB) SubBalance(addr common.Address, amount *big.Int) {
-	stateObject := self.GetOrNewStateObject(addr)
-	if stateObject != nil {
-		stateObject.SubBalance(amount)
 	}
 }
 
@@ -449,7 +425,7 @@ func (self *StateDB) MarkStateObjectDirty(addr common.Address) {
 func (self *StateDB) createObject(addr common.Address) (newobj, prev *StateObject) {
 	prev = self.GetStateObject(addr)
 	newobj = newObject(self, addr, Account{}, self.MarkStateObjectDirty)
-	newobj.setNonce(0) // sets the object to dirty
+	newobj.setNonce(StartingNonce) // sets the object to dirty
 	if prev == nil {
 		if glog.V(logger.Core) {
 			glog.Infof("(+) %x\n", addr)
@@ -495,21 +471,17 @@ func (self *StateDB) Copy() *StateDB {
 		stateObjects:      make(map[common.Address]*StateObject, len(self.stateObjectsDirty)),
 		stateObjectsDirty: make(map[common.Address]struct{}, len(self.stateObjectsDirty)),
 		refund:            new(big.Int).Set(self.refund),
-		logs:              make(map[common.Hash][]*types.Log, len(self.logs)),
+		logs:              make(map[common.Hash]vm.Logs, len(self.logs)),
 		logSize:           self.logSize,
-		preimages:         make(map[common.Hash][]byte),
 	}
-	// Copy the dirty states, logs, and preimages
-	for addr := range self.stateObjectsDirty {
+	// Copy the dirty states and logs
+	for addr, _ := range self.stateObjectsDirty {
 		state.stateObjects[addr] = self.stateObjects[addr].deepCopy(state, state.MarkStateObjectDirty)
 		state.stateObjectsDirty[addr] = struct{}{}
 	}
 	for hash, logs := range self.logs {
-		state.logs[hash] = make([]*types.Log, len(logs))
+		state.logs[hash] = make(vm.Logs, len(logs))
 		copy(state.logs[hash], logs)
-	}
-	for hash, preimage := range self.preimages {
-		state.preimages[hash] = preimage
 	}
 	return state
 }
@@ -553,10 +525,10 @@ func (self *StateDB) GetRefund() *big.Int {
 // IntermediateRoot computes the current root hash of the state trie.
 // It is called in between transactions to get the root hash that
 // goes into transaction receipts.
-func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
-	for addr := range s.stateObjectsDirty {
+func (s *StateDB) IntermediateRoot() common.Hash {
+	for addr, _ := range s.stateObjectsDirty {
 		stateObject := s.stateObjects[addr]
-		if stateObject.suicided || (deleteEmptyObjects && stateObject.empty()) {
+		if stateObject.suicided {
 			s.deleteStateObject(stateObject)
 		} else {
 			stateObject.updateRoot(s.db)
@@ -577,7 +549,7 @@ func (s *StateDB) DeleteSuicides() {
 	// Reset refund so that any used-gas calculations can use this method.
 	s.clearJournalAndRefund()
 
-	for addr := range s.stateObjectsDirty {
+	for addr, _ := range s.stateObjectsDirty {
 		stateObject := s.stateObjects[addr]
 
 		// If the object has been removed by a suicide
@@ -590,17 +562,17 @@ func (s *StateDB) DeleteSuicides() {
 }
 
 // Commit commits all state changes to the database.
-func (s *StateDB) Commit(deleteEmptyObjects bool) (root common.Hash, err error) {
-	root, batch := s.CommitBatch(deleteEmptyObjects)
+func (s *StateDB) Commit() (root common.Hash, err error) {
+	root, batch := s.CommitBatch()
 	return root, batch.Write()
 }
 
 // CommitBatch commits all state changes to a write batch but does not
 // execute the batch. It is used to validate state changes against
 // the root hash stored in a block.
-func (s *StateDB) CommitBatch(deleteEmptyObjects bool) (root common.Hash, batch ethdb.Batch) {
+func (s *StateDB) CommitBatch() (root common.Hash, batch ethdb.Batch) {
 	batch = s.db.NewBatch()
-	root, _ = s.commit(batch, deleteEmptyObjects)
+	root, _ = s.commit(batch)
 
 	glog.V(logger.Debug).Infof("Trie cache stats: %d misses, %d unloads", trie.CacheMisses(), trie.CacheUnloads())
 	return root, batch
@@ -612,18 +584,16 @@ func (s *StateDB) clearJournalAndRefund() {
 	s.refund = new(big.Int)
 }
 
-func (s *StateDB) commit(dbw trie.DatabaseWriter, deleteEmptyObjects bool) (root common.Hash, err error) {
+func (s *StateDB) commit(dbw trie.DatabaseWriter) (root common.Hash, err error) {
 	defer s.clearJournalAndRefund()
 
 	// Commit objects to the trie.
 	for addr, stateObject := range s.stateObjects {
-		_, isDirty := s.stateObjectsDirty[addr]
-		switch {
-		case stateObject.suicided || (isDirty && deleteEmptyObjects && stateObject.empty()):
+		if stateObject.suicided {
 			// If the object has been removed, don't bother syncing it
 			// and just mark it for deletion in the trie.
 			s.deleteStateObject(stateObject)
-		case isDirty:
+		} else if _, ok := s.stateObjectsDirty[addr]; ok {
 			// Write any contract code associated with the state object
 			if stateObject.code != nil && stateObject.dirtyCode {
 				if err := dbw.Put(stateObject.CodeHash(), stateObject.code); err != nil {

@@ -24,7 +24,6 @@ import (
 	"io"
 	"net/http"
 	"regexp"
-	"strings"
 	"sync"
 	"time"
 
@@ -32,8 +31,6 @@ import (
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/swarm/api"
-	"github.com/ethereum/go-ethereum/swarm/storage"
-	"github.com/rs/cors"
 )
 
 const (
@@ -56,37 +53,19 @@ type sequentialReader struct {
 	lock   sync.Mutex
 }
 
-// Server is the basic configuration needs for the HTTP server and also
-// includes CORS settings.
-type Server struct {
-	Addr       string
-	CorsString string
-}
-
 // browser API for registering bzz url scheme handlers:
 // https://developer.mozilla.org/en/docs/Web-based_protocol_handlers
 // electron (chromium) api for registering bzz url scheme handlers:
 // https://github.com/atom/electron/blob/master/docs/api/protocol.md
 
 // starts up http server
-func StartHttpServer(api *api.Api, server *Server) {
+func StartHttpServer(api *api.Api, port string) {
 	serveMux := http.NewServeMux()
 	serveMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		handler(w, r, api)
 	})
-	var allowedOrigins []string
-	for _, domain := range strings.Split(server.CorsString, ",") {
-		allowedOrigins = append(allowedOrigins, strings.TrimSpace(domain))
-	}
-	c := cors.New(cors.Options{
-		AllowedOrigins: allowedOrigins,
-		AllowedMethods: []string{"POST", "GET", "DELETE", "PATCH", "PUT"},
-		MaxAge:         600,
-	})
-	hdlr := c.Handler(serveMux)
-
-	go http.ListenAndServe(server.Addr, hdlr)
-	glog.V(logger.Info).Infof("Swarm HTTP proxy started on localhost:%s", server.Addr)
+	go http.ListenAndServe(":"+port, serveMux)
+	glog.V(logger.Info).Infof("Swarm HTTP proxy started on localhost:%s", port)
 }
 
 func handler(w http.ResponseWriter, r *http.Request, a *api.Api) {
@@ -120,7 +99,7 @@ func handler(w http.ResponseWriter, r *http.Request, a *api.Api) {
 				"[BZZ] Swarm: Protocol error in request `%s`.",
 				uri,
 			)
-			http.Error(w, "Invalid request URL: need access protocol (bzz:/, bzzr:/, bzzi:/) as first element in path.", http.StatusBadRequest)
+			http.Error(w, "BZZ protocol error", http.StatusBadRequest)
 			return
 		}
 	}
@@ -136,11 +115,7 @@ func handler(w http.ResponseWriter, r *http.Request, a *api.Api) {
 
 	switch {
 	case r.Method == "POST" || r.Method == "PUT":
-		if r.Header.Get("content-length") == "" {
-			http.Error(w, "Missing Content-Length header in request.", http.StatusBadRequest)
-			return
-		}
-		key, err := a.Store(io.LimitReader(r.Body, r.ContentLength), r.ContentLength, nil)
+		key, err := a.Store(r.Body, r.ContentLength, nil)
 		if err == nil {
 			glog.V(logger.Debug).Infof("Content for %v stored", key.Log())
 		} else {
@@ -195,42 +170,19 @@ func handler(w http.ResponseWriter, r *http.Request, a *api.Api) {
 		}
 	case r.Method == "GET" || r.Method == "HEAD":
 		path = trailingSlashes.ReplaceAllString(path, "")
-		if path == "" {
-			http.Error(w, "Empty path not allowed", http.StatusBadRequest)
-			return
-		}
 		if raw {
-			var reader storage.LazySectionReader
-			parsedurl, _ := api.Parse(path)
-
-			if parsedurl == path {
-				key, err := a.Resolve(parsedurl, nameresolver)
-				if err != nil {
-					glog.V(logger.Error).Infof("%v", err)
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				reader = a.Retrieve(key)
-			} else {
-				var status int
-				readertmp, _, status, err := a.Get(path, nameresolver)
-				if err != nil {
-					http.Error(w, err.Error(), status)
-					return
-				}
-				reader = readertmp
+			// resolving host
+			key, err := a.Resolve(path, nameresolver)
+			if err != nil {
+				glog.V(logger.Error).Infof("%v", err)
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
 			}
 
 			// retrieving content
-
+			reader := a.Retrieve(key)
 			quitC := make(chan bool)
 			size, err := reader.Size(quitC)
-			if err != nil {
-				glog.V(logger.Debug).Infof("Could not determine size: %v", err.Error())
-				//An error on call to Size means we don't have the root chunk
-				http.Error(w, err.Error(), http.StatusNotFound)
-				return
-			}
 			glog.V(logger.Debug).Infof("Reading %d bytes.", size)
 
 			// setting mime type
@@ -273,12 +225,6 @@ func handler(w http.ResponseWriter, r *http.Request, a *api.Api) {
 			}
 			quitC := make(chan bool)
 			size, err := reader.Size(quitC)
-			if err != nil {
-				glog.V(logger.Debug).Infof("Could not determine size: %v", err.Error())
-				//An error on call to Size means we don't have the root chunk
-				http.Error(w, err.Error(), http.StatusNotFound)
-				return
-			}
 			glog.V(logger.Debug).Infof("Served '%s' (%d bytes) as '%s' (status code: %v)", uri, size, mimeType, status)
 
 			http.ServeContent(w, r, path, forever(), reader)

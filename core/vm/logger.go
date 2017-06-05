@@ -42,10 +42,9 @@ type LogConfig struct {
 	DisableStack   bool // disable stack capture
 	DisableStorage bool // disable storage capture
 	FullStorage    bool // show full storage (slow)
-	Limit          int  // maximum length of output, but zero means unlimited
 }
 
-// StructLog is emitted to the EVM each cycle and lists information about the current internal state
+// StructLog is emitted to the Environment each cycle and lists information about the current internal state
 // prior to the execution of the statement.
 type StructLog struct {
 	Pc      uint64
@@ -65,7 +64,7 @@ type StructLog struct {
 // Note that reference types are actual VM data structures; make copies
 // if you need to retain them beyond the current call.
 type Tracer interface {
-	CaptureState(env *EVM, pc uint64, op OpCode, gas, cost *big.Int, memory *Memory, stack *Stack, contract *Contract, depth int, err error) error
+	CaptureState(env Environment, pc uint64, op OpCode, gas, cost *big.Int, memory *Memory, stack *Stack, contract *Contract, depth int, err error)
 }
 
 // StructLogger is an EVM state logger and implements Tracer.
@@ -94,12 +93,7 @@ func NewStructLogger(cfg *LogConfig) *StructLogger {
 // captureState logs a new structured log message and pushes it out to the environment
 //
 // captureState also tracks SSTORE ops to track dirty values.
-func (l *StructLogger) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost *big.Int, memory *Memory, stack *Stack, contract *Contract, depth int, err error) error {
-	// check if already accumulated the specified number of logs
-	if l.cfg.Limit != 0 && l.cfg.Limit <= len(l.logs) {
-		return ErrTraceLimitReached
-	}
-
+func (l *StructLogger) CaptureState(env Environment, pc uint64, op OpCode, gas, cost *big.Int, memory *Memory, stack *Stack, contract *Contract, depth int, err error) {
 	// initialise new changed values storage container for this contract
 	// if not present.
 	if l.changedValues[contract.Address()] == nil {
@@ -144,7 +138,7 @@ func (l *StructLogger) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost *b
 			storage = make(Storage)
 			// Get the contract account and loop over each storage entry. This may involve looping over
 			// the trie and is a very expensive process.
-			env.StateDB.GetAccount(contract.Address()).ForEachStorage(func(key, value common.Hash) bool {
+			env.Db().GetAccount(contract.Address()).ForEachStorage(func(key, value common.Hash) bool {
 				storage[key] = value
 				// Return true, indicating we'd like to continue.
 				return true
@@ -155,10 +149,9 @@ func (l *StructLogger) CaptureState(env *EVM, pc uint64, op OpCode, gas, cost *b
 		}
 	}
 	// create a new snaptshot of the EVM.
-	log := StructLog{pc, op, new(big.Int).Set(gas), cost, mem, stck, storage, env.depth, err}
+	log := StructLog{pc, op, new(big.Int).Set(gas), cost, mem, stck, storage, env.Depth(), err}
 
 	l.logs = append(l.logs, log)
-	return nil
 }
 
 // StructLogs returns a list of captured log entries

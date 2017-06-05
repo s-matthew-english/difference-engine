@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
-	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -56,7 +55,7 @@ func GOPATH() string {
 	if len(path) == 0 {
 		log.Fatal("GOPATH is not set")
 	}
-	// Ensure that our internal vendor folder is on GOPATH
+	// Ensure that our internal vendor folder in on GOPATH
 	vendor, _ := filepath.Abs(filepath.Join("build", "_vendor"))
 	for _, dir := range path {
 		if dir == vendor {
@@ -76,8 +75,6 @@ func VERSION() string {
 	return string(bytes.TrimSpace(version))
 }
 
-var warnedAboutGit bool
-
 // RunGit runs a git subcommand and returns its output.
 // The command must complete successfully.
 func RunGit(args ...string) string {
@@ -85,10 +82,7 @@ func RunGit(args ...string) string {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err == exec.ErrNotFound {
-		if !warnedAboutGit {
-			log.Println("Warning: can't find 'git' in PATH")
-			warnedAboutGit = true
-		}
+		log.Println("no git in PATH")
 		return ""
 	} else if err != nil {
 		log.Fatal(strings.Join(cmd.Args, " "), ": ", err, "\n", stderr.String())
@@ -120,28 +114,6 @@ func render(tpl *template.Template, outputFile string, outputPerm os.FileMode, x
 		log.Fatal(err)
 	}
 	if err := out.Close(); err != nil {
-		log.Fatal(err)
-	}
-}
-
-// CopyFile copies a file.
-func CopyFile(dst, src string, mode os.FileMode) {
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
-		log.Fatal(err)
-	}
-	destFile, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer destFile.Close()
-
-	srcFile, err := os.Open(src)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer srcFile.Close()
-
-	if _, err := io.Copy(destFile, srcFile); err != nil {
 		log.Fatal(err)
 	}
 }

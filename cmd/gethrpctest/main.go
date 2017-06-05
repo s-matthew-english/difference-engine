@@ -23,7 +23,7 @@ import (
 	"os"
 	"os/signal"
 
-	"github.com/ethereum/go-ethereum/accounts/keystore"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -100,18 +100,17 @@ func MakeSystemNode(privkey string, test *tests.BlockTest) (*node.Node, error) {
 		return nil, err
 	}
 	// Create the keystore and inject an unlocked account if requested
-	ks := stack.AccountManager().Backends(keystore.KeyStoreType)[0].(*keystore.KeyStore)
-
+	accman := stack.AccountManager()
 	if len(privkey) > 0 {
 		key, err := crypto.HexToECDSA(privkey)
 		if err != nil {
 			return nil, err
 		}
-		a, err := ks.ImportECDSA(key, "")
+		a, err := accman.ImportECDSA(key, "")
 		if err != nil {
 			return nil, err
 		}
-		if err := ks.Unlock(a, ""); err != nil {
+		if err := accman.Unlock(a, ""); err != nil {
 			return nil, err
 		}
 	}
@@ -123,7 +122,7 @@ func MakeSystemNode(privkey string, test *tests.BlockTest) (*node.Node, error) {
 	ethConf := &eth.Config{
 		TestGenesisState: db,
 		TestGenesisBlock: test.Genesis,
-		ChainConfig:      &params.ChainConfig{HomesteadBlock: params.MainNetHomesteadBlock},
+		ChainConfig:      &core.ChainConfig{HomesteadBlock: params.MainNetHomesteadBlock},
 	}
 	if err := stack.Register(func(ctx *node.ServiceContext) (node.Service, error) { return eth.New(ctx, ethConf) }); err != nil {
 		return nil, err
@@ -151,7 +150,7 @@ func RunTest(stack *node.Node, test *tests.BlockTest) error {
 		return err
 	}
 	// Retrieve the assembled state and validate it
-	stateDb, err := blockchain.State()
+	stateDb, _, err := blockchain.State()
 	if err != nil {
 		return err
 	}

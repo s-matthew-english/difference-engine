@@ -32,7 +32,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/syndtr/goleveldb/leveldb/util"
@@ -40,67 +39,36 @@ import (
 )
 
 var (
-	initCommand = cli.Command{
-		Action:    initGenesis,
-		Name:      "init",
-		Usage:     "Bootstrap and initialize a new genesis block",
-		ArgsUsage: "<genesisPath>",
-		Category:  "BLOCKCHAIN COMMANDS",
-		Description: `
-The init command initializes a new genesis block and definition for the network.
-This is a destructive action and changes the network in which you will be
-participating.
-`,
-	}
 	importCommand = cli.Command{
-		Action:    importChain,
-		Name:      "import",
-		Usage:     "Import a blockchain file",
-		ArgsUsage: "<filename>",
-		Category:  "BLOCKCHAIN COMMANDS",
-		Description: `
-TODO: Please write this
-`,
+		Action: importChain,
+		Name:   "import",
+		Usage:  `import a blockchain file`,
 	}
 	exportCommand = cli.Command{
-		Action:    exportChain,
-		Name:      "export",
-		Usage:     "Export blockchain into file",
-		ArgsUsage: "<filename> [<blockNumFirst> <blockNumLast>]",
-		Category:  "BLOCKCHAIN COMMANDS",
+		Action: exportChain,
+		Name:   "export",
+		Usage:  `export blockchain into file`,
 		Description: `
 Requires a first argument of the file to write to.
 Optional second and third arguments control the first and
 last block to write. In this mode, the file will be appended
 if already existing.
-`,
+		`,
 	}
 	upgradedbCommand = cli.Command{
-		Action:    upgradeDB,
-		Name:      "upgradedb",
-		Usage:     "Upgrade chainblock database",
-		ArgsUsage: " ",
-		Category:  "BLOCKCHAIN COMMANDS",
-		Description: `
-TODO: Please write this
-`,
+		Action: upgradeDB,
+		Name:   "upgradedb",
+		Usage:  "upgrade chainblock database",
 	}
 	removedbCommand = cli.Command{
-		Action:    removeDB,
-		Name:      "removedb",
-		Usage:     "Remove blockchain and state databases",
-		ArgsUsage: " ",
-		Category:  "BLOCKCHAIN COMMANDS",
-		Description: `
-TODO: Please write this
-`,
+		Action: removeDB,
+		Name:   "removedb",
+		Usage:  "Remove blockchain and state databases",
 	}
 	dumpCommand = cli.Command{
-		Action:    dump,
-		Name:      "dump",
-		Usage:     "Dump a specific block from storage",
-		ArgsUsage: "[<blockHash> | <blockNum>]...",
-		Category:  "BLOCKCHAIN COMMANDS",
+		Action: dump,
+		Name:   "dump",
+		Usage:  `dump a specific block from storage`,
 		Description: `
 The arguments are interpreted as block numbers or hashes.
 Use "ethereum dump 0" to dump the genesis block.
@@ -108,34 +76,12 @@ Use "ethereum dump 0" to dump the genesis block.
 	}
 )
 
-// initGenesis will initialise the given JSON format genesis file and writes it as
-// the zero'd block (i.e. genesis) or will fail hard if it can't succeed.
-func initGenesis(ctx *cli.Context) error {
-	genesisPath := ctx.Args().First()
-	if len(genesisPath) == 0 {
-		utils.Fatalf("must supply path to genesis JSON file")
-	}
-
-	stack := makeFullNode(ctx)
-	chaindb := utils.MakeChainDatabase(ctx, stack)
-
-	genesisFile, err := os.Open(genesisPath)
-	if err != nil {
-		utils.Fatalf("failed to read genesis file: %v", err)
-	}
-	defer genesisFile.Close()
-
-	block, err := core.WriteGenesisBlock(chaindb, genesisFile)
-	if err != nil {
-		utils.Fatalf("failed to write genesis block: %v", err)
-	}
-	glog.V(logger.Info).Infof("successfully wrote genesis block and/or chain rule set: %x", block.Hash())
-	return nil
-}
-
 func importChain(ctx *cli.Context) error {
 	if len(ctx.Args()) != 1 {
 		utils.Fatalf("This command requires an argument.")
+	}
+	if ctx.GlobalBool(utils.TestNetFlag.Name) {
+		state.StartingNonce = 1048576 // (2**20)
 	}
 	stack := makeFullNode(ctx)
 	chain, chainDb := utils.MakeChain(ctx, stack)
@@ -234,7 +180,7 @@ func exportChain(ctx *cli.Context) error {
 
 func removeDB(ctx *cli.Context) error {
 	stack := utils.MakeNode(ctx, clientIdentifier, gitCommit)
-	dbdir := stack.ResolvePath(utils.ChainDbName(ctx))
+	dbdir := stack.ResolvePath("chaindata")
 	if !common.FileExist(dbdir) {
 		fmt.Println(dbdir, "does not exist")
 		return nil

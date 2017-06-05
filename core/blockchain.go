@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/mclock"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -39,7 +38,6 @@ import (
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/metrics"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/pow"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
@@ -47,6 +45,9 @@ import (
 )
 
 var (
+	chainlogger = logger.NewLogger("CHAIN")
+	jsonlogger  = logger.NewJsonLogger()
+
 	blockInsertTimer = metrics.NewTimer("chain/inserts")
 
 	ErrNoGenesis = errors.New("Genesis not found in chain")
@@ -77,7 +78,7 @@ const (
 // included in the canonical one where as GetBlockByNumber always represents the
 // canonical chain.
 type BlockChain struct {
-	config *params.ChainConfig // chain & network configuration
+	config *ChainConfig // chain & network configuration
 
 	hc           *HeaderChain
 	chainDb      ethdb.Database
@@ -92,11 +93,12 @@ type BlockChain struct {
 	currentBlock     *types.Block // Current head of the block chain
 	currentFastBlock *types.Block // Current head of the fast-sync chain (may be above the block chain!)
 
-	stateCache   *state.StateDB // State database to reuse between imports (contains state cache)
-	bodyCache    *lru.Cache     // Cache for the most recent block bodies
-	bodyRLPCache *lru.Cache     // Cache for the most recent block bodies in RLP encoded format
-	blockCache   *lru.Cache     // Cache for the most recent entire blocks
-	futureBlocks *lru.Cache     // future blocks are blocks added for later processing
+	publicStateCache  *state.StateDB // Public state database to reuse between imports (contains state cache)
+	privateStateCache *state.StateDB // Private state database to reuse between imports (contains state cache)
+	bodyCache         *lru.Cache     // Cache for the most recent block bodies
+	bodyRLPCache      *lru.Cache     // Cache for the most recent block bodies in RLP encoded format
+	blockCache        *lru.Cache     // Cache for the most recent entire blocks
+	futureBlocks      *lru.Cache     // future blocks are blocks added for later processing
 
 	quit    chan struct{} // blockchain quit channel
 	running int32         // running must be called atomically
@@ -107,13 +109,14 @@ type BlockChain struct {
 	pow       pow.PoW
 	processor Processor // block processor interface
 	validator Validator // block and state validator interface
-	vmConfig  vm.Config
+
+	chainEvents chan interface{} // Serialized chain insertion events
 }
 
 // NewBlockChain returns a fully initialised block chain using information
 // available in the database. It initialiser the default Ethereum Validator and
 // Processor.
-func NewBlockChain(chainDb ethdb.Database, config *params.ChainConfig, pow pow.PoW, mux *event.TypeMux, vmConfig vm.Config) (*BlockChain, error) {
+func NewBlockChain(chainDb ethdb.Database, config *ChainConfig, pow pow.PoW, mux *event.TypeMux, enableQuorumChecks bool) (*BlockChain, error) {
 	bodyCache, _ := lru.New(bodyCacheLimit)
 	bodyRLPCache, _ := lru.New(bodyCacheLimit)
 	blockCache, _ := lru.New(blockCacheLimit)
@@ -129,9 +132,9 @@ func NewBlockChain(chainDb ethdb.Database, config *params.ChainConfig, pow pow.P
 		blockCache:   blockCache,
 		futureBlocks: futureBlocks,
 		pow:          pow,
-		vmConfig:     vmConfig,
+		chainEvents:  make(chan interface{}, 20), // Buffered for async publishing
 	}
-	bc.SetValidator(NewBlockValidator(config, bc, pow))
+	bc.SetValidator(NewBlockValidator(chainDb, config, bc, enableQuorumChecks))
 	bc.SetProcessor(NewStateProcessor(config, bc))
 
 	gv := func() HeaderValidator { return bc.Validator() }
@@ -150,20 +153,16 @@ func NewBlockChain(chainDb ethdb.Database, config *params.ChainConfig, pow pow.P
 		return nil, err
 	}
 	// Check the current state of the block hashes and make sure that we do not have any of the bad blocks in our chain
-	for hash := range BadHashes {
+	for hash, _ := range BadHashes {
 		if header := bc.GetHeaderByHash(hash); header != nil {
-			// get the canonical block corresponding to the offending header's number
-			headerByNumber := bc.GetHeaderByNumber(header.Number.Uint64())
-			// make sure the headerByNumber (if present) is in our current canonical chain
-			if headerByNumber != nil && headerByNumber.Hash() == header.Hash() {
-				glog.V(logger.Error).Infof("Found bad hash, rewinding chain to block #%d [%x…]", header.Number, header.ParentHash[:4])
-				bc.SetHead(header.Number.Uint64() - 1)
-				glog.V(logger.Error).Infoln("Chain rewind was successful, resuming normal operation")
-			}
+			glog.V(logger.Error).Infof("Found bad hash, rewinding chain to block #%d [%x…]", header.Number, header.ParentHash[:4])
+			bc.SetHead(header.Number.Uint64() - 1)
+			glog.V(logger.Error).Infoln("Chain rewind was successful, resuming normal operation")
 		}
 	}
 	// Take ownership of this particular state
 	go bc.update()
+	go bc.chainEventsLoop()
 	return bc, nil
 }
 
@@ -208,8 +207,15 @@ func (self *BlockChain) loadLastState() error {
 	if err != nil {
 		return err
 	}
-	self.stateCache = statedb
-	self.stateCache.GetAccount(common.Address{})
+	self.publicStateCache = statedb
+	self.publicStateCache.GetAccount(common.Address{})
+
+	// Initialize a statedb cache to ensure singleton account bloom filter generation
+	self.privateStateCache, err = state.New(GetPrivateStateRoot(self.chainDb, self.currentBlock.Hash()), self.chainDb)
+	if err != nil {
+		return err
+	}
+	self.privateStateCache.GetAccount(common.Address{})
 
 	// Issue a status log for the user
 	headerTd := self.GetTd(currentHeader.Hash(), currentHeader.Number.Uint64())
@@ -358,17 +364,23 @@ func (self *BlockChain) Processor() Processor {
 	return self.processor
 }
 
-// AuxValidator returns the auxiliary validator (Proof of work atm)
-func (self *BlockChain) AuxValidator() pow.PoW { return self.pow }
-
 // State returns a new mutable state based on the current HEAD block.
-func (self *BlockChain) State() (*state.StateDB, error) {
+func (self *BlockChain) State() (*state.StateDB, *state.StateDB, error) {
 	return self.StateAt(self.CurrentBlock().Root())
 }
 
 // StateAt returns a new mutable state based on a particular point in time.
-func (self *BlockChain) StateAt(root common.Hash) (*state.StateDB, error) {
-	return self.stateCache.New(root)
+func (self *BlockChain) StateAt(root common.Hash) (*state.StateDB, *state.StateDB, error) {
+	publicStateDb, publicStateDbErr := self.publicStateCache.New(root)
+	if publicStateDbErr != nil {
+		return nil, nil, publicStateDbErr
+	}
+	privateStateDb, privateStateDbErr := self.privateStateCache.New(GetPrivateStateRoot(self.chainDb, root))
+	if privateStateDbErr != nil {
+		return nil, nil, privateStateDbErr
+	}
+
+	return publicStateDb, privateStateDb, nil
 }
 
 // Reset purges the entire blockchain, restoring it to its genesis state.
@@ -402,7 +414,10 @@ func (bc *BlockChain) ResetWithGenesisBlock(genesis *types.Block) {
 
 // Export writes the active chain to the given writer.
 func (self *BlockChain) Export(w io.Writer) error {
-	return self.ExportN(w, uint64(0), self.currentBlock.NumberU64())
+	if err := self.ExportN(w, uint64(0), self.currentBlock.NumberU64()); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ExportN writes a subset of the active chain to the given writer.
@@ -598,11 +613,7 @@ func (self *BlockChain) procFutureBlocks() {
 	}
 	if len(blocks) > 0 {
 		types.BlockBy(types.Number).Sort(blocks)
-
-		// Insert one by one as chain insertion needs contiguous ancestry between blocks
-		for i := range blocks {
-			self.InsertChain(blocks[i : i+1])
-		}
+		self.InsertChain(blocks)
 	}
 }
 
@@ -639,55 +650,9 @@ func (self *BlockChain) Rollback(chain []common.Hash) {
 	}
 }
 
-// SetReceiptsData computes all the non-consensus fields of the receipts
-func SetReceiptsData(config *params.ChainConfig, block *types.Block, receipts types.Receipts) {
-	signer := types.MakeSigner(config, block.Number())
-
-	transactions, logIndex := block.Transactions(), uint(0)
-
-	for j := 0; j < len(receipts); j++ {
-		// The transaction hash can be retrieved from the transaction itself
-		receipts[j].TxHash = transactions[j].Hash()
-
-		tx, _ := transactions[j].AsMessage(signer)
-		// The contract address can be derived from the transaction itself
-		if MessageCreatesContract(tx) {
-			receipts[j].ContractAddress = crypto.CreateAddress(tx.From(), tx.Nonce())
-		}
-		// The used gas can be calculated based on previous receipts
-		if j == 0 {
-			receipts[j].GasUsed = new(big.Int).Set(receipts[j].CumulativeGasUsed)
-		} else {
-			receipts[j].GasUsed = new(big.Int).Sub(receipts[j].CumulativeGasUsed, receipts[j-1].CumulativeGasUsed)
-		}
-		// The derived log fields can simply be set from the block and transaction
-		for k := 0; k < len(receipts[j].Logs); k++ {
-			receipts[j].Logs[k].BlockNumber = block.NumberU64()
-			receipts[j].Logs[k].BlockHash = block.Hash()
-			receipts[j].Logs[k].TxHash = receipts[j].TxHash
-			receipts[j].Logs[k].TxIndex = uint(j)
-			receipts[j].Logs[k].Index = logIndex
-			logIndex++
-		}
-	}
-}
-
 // InsertReceiptChain attempts to complete an already existing header chain with
 // transaction and receipt data.
-// XXX should this be moved to the test?
 func (self *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain []types.Receipts) (int, error) {
-	// Do a sanity check that the provided chain is actually ordered and linked
-	for i := 1; i < len(blockChain); i++ {
-		if blockChain[i].NumberU64() != blockChain[i-1].NumberU64()+1 || blockChain[i].ParentHash() != blockChain[i-1].Hash() {
-			// Chain broke ancestry, log a messge (programming error) and skip insertion
-			failure := fmt.Errorf("non contiguous insert: item %d is #%d [%x…], item %d is #%d [%x…] (parent [%x…])", i-1, blockChain[i-1].NumberU64(),
-				blockChain[i-1].Hash().Bytes()[:4], i, blockChain[i].NumberU64(), blockChain[i].Hash().Bytes()[:4], blockChain[i].ParentHash().Bytes()[:4])
-
-			glog.V(logger.Error).Info(failure.Error())
-			return 0, failure
-		}
-	}
-	// Pre-checks passed, start the block body and receipt imports
 	self.wg.Add(1)
 	defer self.wg.Done()
 
@@ -726,7 +691,32 @@ func (self *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain
 				continue
 			}
 			// Compute all the non-consensus fields of the receipts
-			SetReceiptsData(self.config, block, receipts)
+			transactions, logIndex := block.Transactions(), uint(0)
+			for j := 0; j < len(receipts); j++ {
+				// The transaction hash can be retrieved from the transaction itself
+				receipts[j].TxHash = transactions[j].Hash()
+
+				// The contract address can be derived from the transaction itself
+				if MessageCreatesContract(transactions[j]) {
+					from, _ := transactions[j].From()
+					receipts[j].ContractAddress = crypto.CreateAddress(from, transactions[j].Nonce())
+				}
+				// The used gas can be calculated based on previous receipts
+				if j == 0 {
+					receipts[j].GasUsed = new(big.Int).Set(receipts[j].CumulativeGasUsed)
+				} else {
+					receipts[j].GasUsed = new(big.Int).Sub(receipts[j].CumulativeGasUsed, receipts[j-1].CumulativeGasUsed)
+				}
+				// The derived log fields can simply be set from the block and transaction
+				for k := 0; k < len(receipts[j].Logs); k++ {
+					receipts[j].Logs[k].BlockNumber = block.NumberU64()
+					receipts[j].Logs[k].BlockHash = block.Hash()
+					receipts[j].Logs[k].TxHash = receipts[j].TxHash
+					receipts[j].Logs[k].TxIndex = uint(j)
+					receipts[j].Logs[k].Index = logIndex
+					logIndex++
+				}
+			}
 			// Write all the data out into the database
 			if err := WriteBody(self.chainDb, block.Hash(), block.NumberU64(), block.Body()); err != nil {
 				errs[index] = fmt.Errorf("failed to write block body: %v", err)
@@ -802,7 +792,7 @@ func (self *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain
 	if stats.ignored > 0 {
 		ignored = fmt.Sprintf(" (%d ignored)", stats.ignored)
 	}
-	glog.V(logger.Info).Infof("imported %4d receipts in %9v. #%d [%x… / %x…]%s", stats.processed, common.PrettyDuration(time.Since(start)), last.Number(), first.Hash().Bytes()[:4], last.Hash().Bytes()[:4], ignored)
+	glog.V(logger.Info).Infof("imported %d receipts in %9v. #%d [%x… / %x…]%s", stats.processed, common.PrettyDuration(time.Since(start)), last.Number(), first.Hash().Bytes()[:4], last.Hash().Bytes()[:4], ignored)
 
 	return 0, nil
 }
@@ -853,21 +843,9 @@ func (self *BlockChain) WriteBlock(block *types.Block) (status WriteStatus, err 
 	return
 }
 
-// InsertChain will attempt to insert the given chain in to the canonical chain or, otherwise, create a fork. If an error is returned
+// InsertChain will attempt to insert the given chain in to the canonical chain or, otherwise, create a fork. It an error is returned
 // it will return the index number of the failing block as well an error describing what went wrong (for possible errors see core/errors.go).
 func (self *BlockChain) InsertChain(chain types.Blocks) (int, error) {
-	// Do a sanity check that the provided chain is actually ordered and linked
-	for i := 1; i < len(chain); i++ {
-		if chain[i].NumberU64() != chain[i-1].NumberU64()+1 || chain[i].ParentHash() != chain[i-1].Hash() {
-			// Chain broke ancestry, log a messge (programming error) and skip insertion
-			failure := fmt.Errorf("non contiguous insert: item %d is #%d [%x…], item %d is #%d [%x…] (parent [%x…])",
-				i-1, chain[i-1].NumberU64(), chain[i-1].Hash().Bytes()[:4], i, chain[i].NumberU64(), chain[i].Hash().Bytes()[:4], chain[i].ParentHash().Bytes()[:4])
-
-			glog.V(logger.Error).Info(failure.Error())
-			return 0, failure
-		}
-	}
-	// Pre-checks passed, start the full block imports
 	self.wg.Add(1)
 	defer self.wg.Done()
 
@@ -878,15 +856,10 @@ func (self *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 	// faster than direct delivery and requires much less mutex
 	// acquiring.
 	var (
-		stats         = insertStats{startTime: mclock.Now()}
+		stats         = insertStats{startTime: time.Now()}
 		events        = make([]interface{}, 0, len(chain))
-		coalescedLogs []*types.Log
-		nonceChecked  = make([]bool, len(chain))
+		coalescedLogs vm.Logs
 	)
-
-	// Start the parallel nonce verifier.
-	nonceAbort, nonceResults := verifyNoncesFromBlocks(self.pow, chain)
-	defer close(nonceAbort)
 
 	for i, block := range chain {
 		if atomic.LoadInt32(&self.procInterrupt) == 1 {
@@ -895,20 +868,10 @@ func (self *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 		}
 
 		bstart := time.Now()
-		// Wait for block i's nonce to be verified before processing
-		// its state transition.
-		for !nonceChecked[i] {
-			r := <-nonceResults
-			nonceChecked[r.index] = true
-			if !r.valid {
-				block := chain[r.index]
-				return r.index, &BlockNonceErr{Hash: block.Hash(), Number: block.Number(), Nonce: block.Nonce()}
-			}
-		}
 
 		if BadHashes[block.Hash()] {
 			err := BadHashError(block.Hash())
-			self.reportBlock(block, nil, err)
+			reportBlock(block, err)
 			return i, err
 		}
 		// Stage 1 validation of the block using the chain's validator
@@ -940,43 +903,70 @@ func (self *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 				continue
 			}
 
-			self.reportBlock(block, nil, err)
+			reportBlock(block, err)
+
 			return i, err
 		}
-		// Create a new statedb using the parent block and report an
+
+		// Create a new public statedb using the parent block and report an
 		// error if it fails.
 		switch {
 		case i == 0:
-			err = self.stateCache.Reset(self.GetBlock(block.ParentHash(), block.NumberU64()-1).Root())
+			err = self.publicStateCache.Reset(self.GetBlock(block.ParentHash(), block.NumberU64()-1).Root())
 		default:
-			err = self.stateCache.Reset(chain[i-1].Root())
+			err = self.publicStateCache.Reset(chain[i-1].Root())
 		}
 		if err != nil {
-			self.reportBlock(block, nil, err)
+			reportBlock(block, err)
+			return i, err
+		}
+		// Create a new private statedb using the parent block and report an
+		// error if it fails.
+		switch {
+		case i == 0:
+			privateRoot := GetPrivateStateRoot(self.chainDb, self.GetBlock(block.ParentHash(), block.NumberU64()-1).Root())
+			err = self.privateStateCache.Reset(privateRoot)
+		default:
+			privateRoot := GetPrivateStateRoot(self.chainDb, chain[i-1].Root())
+			err = self.privateStateCache.Reset(privateRoot)
+		}
+		if err != nil {
+			reportBlock(block, err)
 			return i, err
 		}
 		// Process block using the parent state as reference point.
-		receipts, logs, usedGas, err := self.processor.Process(block, self.stateCache, self.vmConfig)
+		publicReceipts, privateReceipts, logs, usedGas, err := self.processor.Process(block, self.publicStateCache, self.privateStateCache, self.config.VmConfig)
 		if err != nil {
-			self.reportBlock(block, receipts, err)
+			reportBlock(block, err)
 			return i, err
 		}
+
 		// Validate the state using the default validator
-		err = self.Validator().ValidateState(block, self.GetBlock(block.ParentHash(), block.NumberU64()-1), self.stateCache, receipts, usedGas)
+		err = self.Validator().ValidateState(block, self.GetBlock(block.ParentHash(), block.NumberU64()-1), self.publicStateCache, publicReceipts, usedGas)
 		if err != nil {
-			self.reportBlock(block, receipts, err)
+			reportBlock(block, err)
 			return i, err
 		}
-		// Write state changes to database
-		_, err = self.stateCache.Commit(self.config.IsEIP158(block.Number()))
+		// Write public state changes to database
+		_, err = self.publicStateCache.Commit()
 		if err != nil {
+			return i, err
+		}
+
+		// Write private state changes to database
+		privateStateRoot, err := self.privateStateCache.Commit()
+		if err != nil {
+			return i, err
+		}
+		if err := WritePrivateStateRoot(self.chainDb, block.Root(), privateStateRoot); err != nil {
 			return i, err
 		}
 
 		// coalesce logs for later processing
 		coalescedLogs = append(coalescedLogs, logs...)
 
-		if err := WriteBlockReceipts(self.chainDb, block.Hash(), block.NumberU64(), receipts); err != nil {
+		allReceipts := append(publicReceipts, privateReceipts...)
+		if err := WriteBlockReceipts(self.chainDb, block.Hash(), block.NumberU64(), allReceipts); err != nil {
 			return i, err
 		}
 
@@ -999,15 +989,15 @@ func (self *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 				return i, err
 			}
 			// store the receipts
-			if err := WriteReceipts(self.chainDb, receipts); err != nil {
+			if err := WriteReceipts(self.chainDb, allReceipts); err != nil {
 				return i, err
 			}
 			// Write map map bloom filters
-			if err := WriteMipmapBloom(self.chainDb, block.NumberU64(), receipts); err != nil {
+			if err := WriteMipmapBloom(self.chainDb, block.NumberU64(), allReceipts); err != nil {
 				return i, err
 			}
-			// Write hash preimages
-			if err := WritePreimages(self.chainDb, block.NumberU64(), self.stateCache.Preimages()); err != nil {
+			// Write private block bloom
+			if err := WritePrivateBlockBloom(self.chainDb, block.NumberU64(), privateReceipts); err != nil {
 				return i, err
 			}
 		case SideStatTy:
@@ -1015,7 +1005,7 @@ func (self *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 				glog.Infof("inserted forked block #%d [%x…] (TD=%v) in %9v: %3d txs %d uncles.", block.Number(), block.Hash().Bytes()[0:4], block.Difficulty(), common.PrettyDuration(time.Since(bstart)), len(block.Transactions()), len(block.Uncles()))
 			}
 			blockInsertTimer.UpdateSince(bstart)
-			events = append(events, ChainSideEvent{block})
+			events = append(events, ChainSideEvent{block, logs})
 
 		case SplitStatTy:
 			events = append(events, ChainSplitEvent{block, logs})
@@ -1028,7 +1018,12 @@ func (self *BlockChain) InsertChain(chain types.Blocks) (int, error) {
 		}
 	}
 
-	go self.postChainEvents(events, coalescedLogs)
+	//
+	// This should remain *synchronous* so that we can control ordering of
+	// ChainHeadEvents. This is important for supporting low latency
+	// (non-Proof-of-Work) consensus mechanisms.
+	//
+	self.postChainEvents(events, coalescedLogs)
 
 	return 0, nil
 }
@@ -1038,7 +1033,7 @@ type insertStats struct {
 	queued, processed, ignored int
 	usedGas                    uint64
 	lastIndex                  int
-	startTime                  mclock.AbsTime
+	startTime                  time.Time
 }
 
 // statsReportLimit is the time limit during import after which we always print
@@ -1050,24 +1045,28 @@ const statsReportLimit = 8 * time.Second
 func (st *insertStats) report(chain []*types.Block, index int) {
 	// Fetch the timings for the batch
 	var (
-		now     = mclock.Now()
-		elapsed = time.Duration(now) - time.Duration(st.startTime)
+		now     = time.Now()
+		elapsed = now.Sub(st.startTime)
 	)
+	if elapsed == 0 { // Yes Windows, I'm looking at you
+		elapsed = 1
+	}
 	// If we're at the last block of the batch or report period reached, log
 	if index == len(chain)-1 || elapsed >= statsReportLimit {
 		start, end := chain[st.lastIndex], chain[index]
 		txcount := countTransactions(chain[st.lastIndex : index+1])
 
-		var hashes, extra string
+		extra := ""
 		if st.queued > 0 || st.ignored > 0 {
 			extra = fmt.Sprintf(" (%d queued %d ignored)", st.queued, st.ignored)
 		}
+		hashes := ""
 		if st.processed > 1 {
 			hashes = fmt.Sprintf("%x… / %x…", start.Hash().Bytes()[:4], end.Hash().Bytes()[:4])
 		} else {
 			hashes = fmt.Sprintf("%x…", end.Hash().Bytes()[:4])
 		}
-		glog.Infof("imported %4d blocks, %5d txs (%7.3f Mg) in %9v (%6.3f Mg/s). #%v [%s]%s", st.processed, txcount, float64(st.usedGas)/1000000, common.PrettyDuration(elapsed), float64(st.usedGas)*1000/float64(elapsed), end.Number(), hashes, extra)
+		glog.Infof("imported %d blocks, %5d txs (%7.3f Mg) in %9v (%6.3f Mg/s). #%v [%s]%s", st.processed, txcount, float64(st.usedGas)/1000000, common.PrettyDuration(elapsed), float64(st.usedGas)*1000/float64(elapsed), end.Number(), hashes, extra)
 
 		*st = insertStats{startTime: now, lastIndex: index}
 	}
@@ -1085,23 +1084,24 @@ func countTransactions(chain []*types.Block) (c int) {
 // event about them
 func (self *BlockChain) reorg(oldBlock, newBlock *types.Block) error {
 	var (
-		newChain    types.Blocks
-		oldChain    types.Blocks
-		commonBlock *types.Block
-		deletedTxs  types.Transactions
-		deletedLogs []*types.Log
+		newChain          types.Blocks
+		oldChain          types.Blocks
+		commonBlock       *types.Block
+		oldStart          = oldBlock
+		newStart          = newBlock
+		deletedTxs        types.Transactions
+		deletedLogs       vm.Logs
+		deletedLogsByHash = make(map[common.Hash]vm.Logs)
 		// collectLogs collects the logs that were generated during the
 		// processing of the block that corresponds with the given hash.
 		// These logs are later announced as deleted.
 		collectLogs = func(h common.Hash) {
-			// Coalesce logs and set 'Removed'.
+			// Coalesce logs
 			receipts := GetBlockReceipts(self.chainDb, h, self.hc.GetBlockNumber(h))
 			for _, receipt := range receipts {
-				for _, log := range receipt.Logs {
-					del := *log
-					del.Removed = true
-					deletedLogs = append(deletedLogs, &del)
-				}
+				deletedLogs = append(deletedLogs, receipt.Logs...)
+
+				deletedLogsByHash[h] = receipt.Logs
 			}
 		}
 	)
@@ -1128,6 +1128,7 @@ func (self *BlockChain) reorg(oldBlock, newBlock *types.Block) error {
 		return fmt.Errorf("Invalid new chain")
 	}
 
+	numSplit := newBlock.Number()
 	for {
 		if oldBlock.Hash() == newBlock.Hash() {
 			commonBlock = oldBlock
@@ -1148,19 +1149,9 @@ func (self *BlockChain) reorg(oldBlock, newBlock *types.Block) error {
 		}
 	}
 
-	if oldLen := len(oldChain); oldLen > 63 || glog.V(logger.Debug) {
-		newLen := len(newChain)
-		newLast := newChain[0]
-		newFirst := newChain[newLen-1]
-		oldLast := oldChain[0]
-		oldFirst := oldChain[oldLen-1]
-		glog.Infof("Chain split detected after #%v [%x…]. Reorganising chain (-%v +%v blocks), rejecting #%v-#%v [%x…/%x…] in favour of #%v-#%v [%x…/%x…]",
-			commonBlock.Number(), commonBlock.Hash().Bytes()[:4],
-			oldLen, newLen,
-			oldFirst.Number(), oldLast.Number(),
-			oldFirst.Hash().Bytes()[:4], oldLast.Hash().Bytes()[:4],
-			newFirst.Number(), newLast.Number(),
-			newFirst.Hash().Bytes()[:4], newLast.Hash().Bytes()[:4])
+	if glog.V(logger.Debug) {
+		commonHash := commonBlock.Hash()
+		glog.Infof("Chain split detected @ %x. Reorganising chain from #%v %x to %x", commonHash[:4], numSplit, oldStart.Hash().Bytes()[:4], newStart.Hash().Bytes()[:4])
 	}
 
 	var addedTxs types.Transactions
@@ -1204,7 +1195,7 @@ func (self *BlockChain) reorg(oldBlock, newBlock *types.Block) error {
 	if len(oldChain) > 0 {
 		go func() {
 			for _, block := range oldChain {
-				self.eventMux.Post(ChainSideEvent{Block: block})
+				self.eventMux.Post(ChainSideEvent{Block: block, Logs: deletedLogsByHash[block.Hash()]})
 			}
 		}()
 	}
@@ -1212,21 +1203,44 @@ func (self *BlockChain) reorg(oldBlock, newBlock *types.Block) error {
 	return nil
 }
 
+// When we insert into the blockchain we must publish logs, chain head events,
+// and contract events. `eventMux.Post` cannot be called while we are holding
+// `mu`, and we need to maintain a correct ordering of these events for
+// correctness, so they are published into the `chainEvents` channel, and
+// a goroutine running this loop performs the `Post`.
+func (self *BlockChain) chainEventsLoop() {
+	for e := range self.chainEvents {
+		self.eventMux.Post(e)
+	}
+}
+
+
 // postChainEvents iterates over the events generated by a chain insertion and
-// posts them into the event mux.
-func (self *BlockChain) postChainEvents(events []interface{}, logs []*types.Log) {
+// posts them.
+//
+// Assumes mu is held, and that this is called synchronously (not with `go`).
+//
+// Unlike vanilla Ethereum, we require this method is called synchronously, so
+// that we can control the order that we publish `ChainHeadEvent`s in
+// low-latency, non-PoW settings. To avoid impacting performance, we post the
+// events into a buffered intermediary channel `chainEvents`. From there,
+// `chainEventsLoop` will publish into the `eventMux`. Because `chainEvents`
+// is buffered, writes into that channel will be asynchronous (until the
+// channel is full).
+func (self *BlockChain) postChainEvents(events []interface{}, logs vm.Logs) {
+	// Requires mu:
+	currBlockHash := self.currentBlock.Hash()
+
 	// post event logs for further processing
-	self.eventMux.Post(logs)
+	self.chainEvents <- logs
 	for _, event := range events {
 		if event, ok := event.(ChainEvent); ok {
-			// We need some control over the mining operation. Acquiring locks and waiting for the miner to create new block takes too long
-			// and in most cases isn't even necessary.
-			if self.LastBlockHash() == event.Hash {
-				self.eventMux.Post(ChainHeadEvent{event.Block})
+			if currBlockHash == event.Hash {
+				self.chainEvents <- ChainHeadEvent{event.Block}
 			}
 		}
 		// Fire the insertion events individually too
-		self.eventMux.Post(event)
+		self.chainEvents <- event
 	}
 }
 
@@ -1243,23 +1257,10 @@ func (self *BlockChain) update() {
 }
 
 // reportBlock logs a bad block error.
-func (bc *BlockChain) reportBlock(block *types.Block, receipts types.Receipts, err error) {
+func reportBlock(block *types.Block, err error) {
 	if glog.V(logger.Error) {
-		var receiptString string
-		for _, receipt := range receipts {
-			receiptString += fmt.Sprintf("\t%v\n", receipt)
-		}
-		glog.Errorf(`
-########## BAD BLOCK #########
-Chain config: %v
-
-Number: %v
-Hash: 0x%x
-%v
-
-Error: %v
-##############################
-`, bc.config, block.Number(), block.Hash(), receiptString, err)
+		glog.Errorf("Bad block #%v (%s)\n", block.Number(), block.Hash().Hex())
+		glog.Errorf("    %v", err)
 	}
 }
 
@@ -1362,4 +1363,4 @@ func (self *BlockChain) GetHeaderByNumber(number uint64) *types.Header {
 }
 
 // Config retrieves the blockchain's chain configuration.
-func (self *BlockChain) Config() *params.ChainConfig { return self.config }
+func (self *BlockChain) Config() *ChainConfig { return self.config }

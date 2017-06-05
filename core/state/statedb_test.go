@@ -29,7 +29,7 @@ import (
 	"testing/quick"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/ethdb"
 )
 
@@ -51,7 +51,7 @@ func TestUpdateLeaks(t *testing.T) {
 		if i%3 == 0 {
 			state.SetCode(addr, []byte{i, i, i, i, i})
 		}
-		state.IntermediateRoot(false)
+		state.IntermediateRoot()
 	}
 	// Ensure that no data was leaked into the database
 	for _, key := range db.Keys() {
@@ -86,7 +86,7 @@ func TestIntermediateLeaks(t *testing.T) {
 		modify(transState, common.Address{byte(i)}, i, 0)
 	}
 	// Write modifications to trie.
-	transState.IntermediateRoot(false)
+	transState.IntermediateRoot()
 
 	// Overwrite all the data with new values in the transient database.
 	for i := byte(0); i < 255; i++ {
@@ -95,10 +95,10 @@ func TestIntermediateLeaks(t *testing.T) {
 	}
 
 	// Commit and cross check the databases.
-	if _, err := transState.Commit(false); err != nil {
+	if _, err := transState.Commit(); err != nil {
 		t.Fatalf("failed to commit transition state: %v", err)
 	}
-	if _, err := finalState.Commit(false); err != nil {
+	if _, err := finalState.Commit(); err != nil {
 		t.Fatalf("failed to commit final state: %v", err)
 	}
 	for _, key := range finalDb.Keys() {
@@ -115,8 +115,37 @@ func TestIntermediateLeaks(t *testing.T) {
 	}
 }
 
+func TestStorageRoot(t *testing.T) {
+	var (
+		db, _    = ethdb.NewMemDatabase()
+		state, _ = New(common.Hash{}, db)
+		addr     = common.Address{1}
+		key      = common.Hash{1}
+		value    = common.Hash{42}
+
+		empty = common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
+	)
+
+	so := state.GetOrNewStateObject(addr)
+
+	emptyRoot := so.storageRoot(db)
+	if emptyRoot != empty {
+		t.Errorf("Invalid empty storate root, expected %x, got %x", empty, emptyRoot)
+	}
+
+	// add a bit of state
+	so.SetState(db, key, value)
+	state.Commit()
+
+	root := so.storageRoot(db)
+	expected := common.HexToHash("63511abd258fa907afa30cb118b53744a4f49055bb3f531da512c6b866fc2ffb")
+
+	if expected != root {
+		t.Errorf("Invalid storage root, expected %x, got %x", expected, root)
+	}
+}
+
 func TestSnapshotRandom(t *testing.T) {
-	t.Skip("@fjl fix me please")
 	config := &quick.Config{MaxCount: 1000}
 	err := quick.Check((*snapshotTest).run, config)
 	if cerr, ok := err.(*quick.CheckError); ok {
@@ -221,7 +250,7 @@ func newTestAction(addr common.Address, r *rand.Rand) testAction {
 			fn: func(a testAction, s *StateDB) {
 				data := make([]byte, 2)
 				binary.BigEndian.PutUint16(data, uint16(a.args[0]))
-				s.AddLog(&types.Log{Address: addr, Data: data})
+				s.AddLog(&vm.Log{Address: addr, Data: data})
 			},
 			args: make([]int64, 1),
 		},
@@ -354,23 +383,4 @@ func (test *snapshotTest) checkEqual(state, checkstate *StateDB) error {
 			state.GetLogs(common.Hash{}), checkstate.GetLogs(common.Hash{}))
 	}
 	return nil
-}
-
-func TestTouchDelete(t *testing.T) {
-	db, _ := ethdb.NewMemDatabase()
-	state, _ := New(common.Hash{}, db)
-	state.GetOrNewStateObject(common.Address{})
-	root, _ := state.Commit(false)
-	state.Reset(root)
-
-	snapshot := state.Snapshot()
-	state.AddBalance(common.Address{}, new(big.Int))
-	if len(state.stateObjectsDirty) != 1 {
-		t.Fatal("expected one dirty state object")
-	}
-
-	state.RevertToSnapshot(snapshot)
-	if len(state.stateObjectsDirty) != 0 {
-		t.Fatal("expected no dirty state object")
-	}
 }

@@ -40,14 +40,14 @@ func TestEnvelopeOpen(t *testing.T) {
 	if opened.Flags != message.Flags {
 		t.Fatalf("flags mismatch: have %d, want %d", opened.Flags, message.Flags)
 	}
-	if !bytes.Equal(opened.Signature, message.Signature) {
+	if bytes.Compare(opened.Signature, message.Signature) != 0 {
 		t.Fatalf("signature mismatch: have 0x%x, want 0x%x", opened.Signature, message.Signature)
 	}
-	if !bytes.Equal(opened.Payload, message.Payload) {
+	if bytes.Compare(opened.Payload, message.Payload) != 0 {
 		t.Fatalf("payload mismatch: have 0x%x, want 0x%x", opened.Payload, message.Payload)
 	}
 	if opened.Sent.Unix() != message.Sent.Unix() {
-		t.Fatalf("send time mismatch: have %v, want %v", opened.Sent, message.Sent)
+		t.Fatalf("send time mismatch: have %d, want %d", opened.Sent, message.Sent)
 	}
 	if opened.TTL/time.Second != DefaultTTL/time.Second {
 		t.Fatalf("message TTL mismatch: have %v, want %v", opened.TTL, DefaultTTL)
@@ -71,7 +71,7 @@ func TestEnvelopeAnonymousOpenUntargeted(t *testing.T) {
 	if opened.To != nil {
 		t.Fatalf("recipient mismatch: have 0x%x, want nil", opened.To)
 	}
-	if !bytes.Equal(opened.Payload, payload) {
+	if bytes.Compare(opened.Payload, payload) != 0 {
 		t.Fatalf("payload mismatch: have 0x%x, want 0x%x", opened.Payload, payload)
 	}
 }
@@ -96,7 +96,7 @@ func TestEnvelopeAnonymousOpenTargeted(t *testing.T) {
 	if opened.To != nil {
 		t.Fatalf("recipient mismatch: have 0x%x, want nil", opened.To)
 	}
-	if bytes.Equal(opened.Payload, payload) {
+	if bytes.Compare(opened.Payload, payload) == 0 {
 		t.Fatalf("payload match, should have been encrypted: 0x%x", opened.Payload)
 	}
 }
@@ -127,7 +127,7 @@ func TestEnvelopeIdentifiedOpenUntargeted(t *testing.T) {
 	if opened.To != nil {
 		t.Fatalf("recipient mismatch: have 0x%x, want nil", opened.To)
 	}
-	if !bytes.Equal(opened.Payload, payload) {
+	if bytes.Compare(opened.Payload, payload) != 0 {
 		t.Fatalf("payload mismatch: have 0x%x, want 0x%x", opened.Payload, payload)
 	}
 }
@@ -152,7 +152,7 @@ func TestEnvelopeIdentifiedOpenTargeted(t *testing.T) {
 	if opened.To != nil {
 		t.Fatalf("recipient mismatch: have 0x%x, want nil", opened.To)
 	}
-	if !bytes.Equal(opened.Payload, payload) {
+	if bytes.Compare(opened.Payload, payload) != 0 {
 		t.Fatalf("payload mismatch: have 0x%x, want 0x%x", opened.Payload, payload)
 	}
 }

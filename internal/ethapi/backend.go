@@ -1,4 +1,4 @@
-// Copyright 2015 The go-ethereum Authors
+// Copyright 2016 The go-ethereum Authors
 // This file is part of the go-ethereum library.
 //
 // The go-ethereum library is free software: you can redistribute it and/or modify
@@ -28,7 +28,6 @@ import (
 	"github.com/ethereum/go-ethereum/eth/downloader"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rpc"
 	"golang.org/x/net/context"
 )
@@ -45,24 +44,21 @@ type Backend interface {
 	AccountManager() *accounts.Manager
 	// BlockChain API
 	SetHead(number uint64)
-	HeaderByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*types.Header, error)
+	HeaderByNumber(blockNr rpc.BlockNumber) *types.Header
 	BlockByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*types.Block, error)
-	StateAndHeaderByNumber(ctx context.Context, blockNr rpc.BlockNumber) (State, *types.Header, error)
+	StateAndHeaderByNumber(blockNr rpc.BlockNumber) (State, *types.Header, error)
 	GetBlock(ctx context.Context, blockHash common.Hash) (*types.Block, error)
 	GetReceipts(ctx context.Context, blockHash common.Hash) (types.Receipts, error)
 	GetTd(blockHash common.Hash) *big.Int
-	GetVMEnv(ctx context.Context, msg core.Message, state State, header *types.Header) (*vm.EVM, func() error, error)
+	GetVMEnv(ctx context.Context, msg core.Message, state State, header *types.Header) (vm.Environment, func() error, error)
 	// TxPool API
 	SendTx(ctx context.Context, signedTx *types.Transaction) error
 	RemoveTx(txHash common.Hash)
-	GetPoolTransactions() (types.Transactions, error)
+	GetPoolTransactions() types.Transactions
 	GetPoolTransaction(txHash common.Hash) *types.Transaction
 	GetPoolNonce(ctx context.Context, addr common.Address) (uint64, error)
 	Stats() (pending int, queued int)
 	TxPoolContent() (map[common.Address]types.Transactions, map[common.Address]types.Transactions)
-
-	ChainConfig() *params.ChainConfig
-	CurrentBlock() *types.Block
 }
 
 type State interface {

@@ -20,18 +20,14 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math/big"
-	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
-	"github.com/ethereum/go-ethereum/metrics"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -40,13 +36,16 @@ var (
 	headBlockKey  = []byte("LastBlock")
 	headFastKey   = []byte("LastFast")
 
-	headerPrefix        = []byte("h")   // headerPrefix + num (uint64 big endian) + hash -> header
-	tdSuffix            = []byte("t")   // headerPrefix + num (uint64 big endian) + hash + tdSuffix -> td
-	numSuffix           = []byte("n")   // headerPrefix + num (uint64 big endian) + numSuffix -> hash
-	blockHashPrefix     = []byte("H")   // blockHashPrefix + hash -> num (uint64 big endian)
-	bodyPrefix          = []byte("b")   // bodyPrefix + num (uint64 big endian) + hash -> block body
-	blockReceiptsPrefix = []byte("r")   // blockReceiptsPrefix + num (uint64 big endian) + hash -> block receipts
-	preimagePrefix      = "secure-key-" // preimagePrefix + hash -> preimage
+	headerPrefix               = []byte("h")  // headerPrefix + num (uint64 big endian) + hash -> header
+	tdSuffix                   = []byte("t")  // headerPrefix + num (uint64 big endian) + hash + tdSuffix -> td
+	numSuffix                  = []byte("n")  // headerPrefix + num (uint64 big endian) + numSuffix -> hash
+	blockHashPrefix            = []byte("H")  // blockHashPrefix + hash -> num (uint64 big endian)
+	bodyPrefix                 = []byte("b")  // bodyPrefix + num (uint64 big endian) + hash -> block body
+	blockReceiptsPrefix        = []byte("r")  // blockReceiptsPrefix + num (uint64 big endian) + hash -> block receipts
+	privateRootPrefix          = []byte("P")  // rootPrefix + block public root -> hash
+	privateblockReceiptsPrefix = []byte("Pr") // blockReceiptsPrefix + num (uint64 big endian) + hash -> block receipts
+	privateReceiptPrefix       = []byte("Prs")
+	privateBloomPrefix         = []byte("Pb")
 
 	txMetaSuffix   = []byte{0x01}
 	receiptsPrefix = []byte("receipts-")
@@ -64,14 +63,23 @@ var (
 	oldBlockNumPrefix      = []byte("block-num-")
 	oldBlockReceiptsPrefix = []byte("receipts-block-")
 	oldBlockHashPrefix     = []byte("block-hash-") // [deprecated by the header/block split, remove eventually]
-
-	ChainConfigNotFoundErr = errors.New("ChainConfig not found") // general config not found error
-
-	mipmapBloomMu sync.Mutex // protect against race condition when updating mipmap blooms
-
-	preimageCounter    = metrics.NewCounter("db/preimage/total")
-	preimageHitCounter = metrics.NewCounter("db/preimage/hits")
 )
+
+// WritePrivateBlockBloom creates a bloom filter for the given receipts and saves it to the database
+// with the number given as identifier (i.e. block number).
+func WritePrivateBlockBloom(db ethdb.Database, number uint64, receipts types.Receipts) error {
+	rbloom := types.CreateBloom(receipts)
+	return db.Put(append(privateBloomPrefix, encodeBlockNumber(number)...), rbloom[:])
+}
+
+// GetPrivateBlockBloom retrieves the private bloom associated with the given number.
+func GetPrivateBlockBloom(db ethdb.Database, number uint64) (bloom types.Bloom) {
+	data, _ := db.Get(append(privateBloomPrefix, encodeBlockNumber(number)...))
+	if len(data) > 0 {
+		bloom = types.BytesToBloom(data)
+	}
+	return bloom
+}
 
 // encodeBlockNumber encodes a block number as big endian uint64
 func encodeBlockNumber(number uint64) []byte {
@@ -359,13 +367,8 @@ func WriteBody(db ethdb.Database, hash common.Hash, number uint64, body *types.B
 	if err != nil {
 		return err
 	}
-	return WriteBodyRLP(db, hash, number, data)
-}
-
-// WriteBodyRLP writes a serialized body of a block into the database.
-func WriteBodyRLP(db ethdb.Database, hash common.Hash, number uint64, rlp rlp.RawValue) error {
 	key := append(append(bodyPrefix, encodeBlockNumber(number)...), hash.Bytes()...)
-	if err := db.Put(key, rlp); err != nil {
+	if err := db.Put(key, data); err != nil {
 		glog.Fatalf("failed to store block body into database: %v", err)
 	}
 	glog.V(logger.Debug).Infof("stored block body [%x…]", hash.Bytes()[:4])
@@ -412,6 +415,7 @@ func WriteBlockReceipts(db ethdb.Database, hash common.Hash, number uint64, rece
 	if err != nil {
 		return err
 	}
+
 	// Store the flattened receipt slice
 	key := append(append(blockReceiptsPrefix, encodeBlockNumber(number)...), hash.Bytes()...)
 	if err := db.Put(key, bytes); err != nil {
@@ -461,16 +465,6 @@ func WriteTransactions(db ethdb.Database, block *types.Block) error {
 		glog.Fatalf("failed to store transactions into database: %v", err)
 	}
 	return nil
-}
-
-// WriteReceipt stores a single transaction receipt into the database.
-func WriteReceipt(db ethdb.Database, receipt *types.Receipt) error {
-	storageReceipt := (*types.ReceiptForStorage)(receipt)
-	data, err := rlp.EncodeToBytes(storageReceipt)
-	if err != nil {
-		return err
-	}
-	return db.Put(append(receiptsPrefix, receipt.TxHash.Bytes()...), data)
 }
 
 // WriteReceipts stores a batch of transaction receipts into the database.
@@ -572,9 +566,6 @@ func mipmapKey(num, level uint64) []byte {
 // WriteMapmapBloom writes each address included in the receipts' logs to the
 // MIP bloom bin.
 func WriteMipmapBloom(db ethdb.Database, number uint64, receipts types.Receipts) error {
-	mipmapBloomMu.Lock()
-	defer mipmapBloomMu.Unlock()
-
 	batch := db.NewBatch()
 	for _, level := range MIPMapLevels {
 		key := mipmapKey(number, level)
@@ -600,34 +591,6 @@ func GetMipmapBloom(db ethdb.Database, number, level uint64) types.Bloom {
 	return types.BytesToBloom(bloomDat)
 }
 
-// PreimageTable returns a Database instance with the key prefix for preimage entries.
-func PreimageTable(db ethdb.Database) ethdb.Database {
-	return ethdb.NewTable(db, preimagePrefix)
-}
-
-// WritePreimages writes the provided set of preimages to the database. `number` is the
-// current block number, and is used for debug messages only.
-func WritePreimages(db ethdb.Database, number uint64, preimages map[common.Hash][]byte) error {
-	table := PreimageTable(db)
-	batch := table.NewBatch()
-	hitCount := 0
-	for hash, preimage := range preimages {
-		if _, err := table.Get(hash.Bytes()); err != nil {
-			batch.Put(hash.Bytes(), preimage)
-			hitCount += 1
-		}
-	}
-	preimageCounter.Inc(int64(len(preimages)))
-	preimageHitCounter.Inc(int64(hitCount))
-	if hitCount > 0 {
-		if err := batch.Write(); err != nil {
-			return fmt.Errorf("preimage write fail for block %d: %v", number, err)
-		}
-		glog.V(logger.Debug).Infof("%d preimages in block %d, including %d new", len(preimages), number, hitCount)
-	}
-	return nil
-}
-
 // GetBlockChainVersion reads the version number from db.
 func GetBlockChainVersion(db ethdb.Database) int {
 	var vsn uint
@@ -643,7 +606,7 @@ func WriteBlockChainVersion(db ethdb.Database, vsn int) {
 }
 
 // WriteChainConfig writes the chain config settings to the database.
-func WriteChainConfig(db ethdb.Database, hash common.Hash, cfg *params.ChainConfig) error {
+func WriteChainConfig(db ethdb.Database, hash common.Hash, cfg *ChainConfig) error {
 	// short circuit and ignore if nil config. GetChainConfig
 	// will return a default.
 	if cfg == nil {
@@ -659,13 +622,13 @@ func WriteChainConfig(db ethdb.Database, hash common.Hash, cfg *params.ChainConf
 }
 
 // GetChainConfig will fetch the network settings based on the given hash.
-func GetChainConfig(db ethdb.Database, hash common.Hash) (*params.ChainConfig, error) {
+func GetChainConfig(db ethdb.Database, hash common.Hash) (*ChainConfig, error) {
 	jsonChainConfig, _ := db.Get(append(configPrefix, hash[:]...))
 	if len(jsonChainConfig) == 0 {
 		return nil, ChainConfigNotFoundErr
 	}
 
-	var config params.ChainConfig
+	var config ChainConfig
 	if err := json.Unmarshal(jsonChainConfig, &config); err != nil {
 		return nil, err
 	}
@@ -673,29 +636,11 @@ func GetChainConfig(db ethdb.Database, hash common.Hash) (*params.ChainConfig, e
 	return &config, nil
 }
 
-// FindCommonAncestor returns the last common ancestor of two block headers
-func FindCommonAncestor(db ethdb.Database, a, b *types.Header) *types.Header {
-	for bn := b.Number.Uint64(); a.Number.Uint64() > bn; {
-		a = GetHeader(db, a.ParentHash, a.Number.Uint64()-1)
-		if a == nil {
-			return nil
-		}
-	}
-	for an := a.Number.Uint64(); an < b.Number.Uint64(); {
-		b = GetHeader(db, b.ParentHash, b.Number.Uint64()-1)
-		if b == nil {
-			return nil
-		}
-	}
-	for a.Hash() != b.Hash() {
-		a = GetHeader(db, a.ParentHash, a.Number.Uint64()-1)
-		if a == nil {
-			return nil
-		}
-		b = GetHeader(db, b.ParentHash, b.Number.Uint64()-1)
-		if b == nil {
-			return nil
-		}
-	}
-	return a
+func GetPrivateStateRoot(db ethdb.Database, blockRoot common.Hash) common.Hash {
+	root, _ := db.Get(append(privateRootPrefix, blockRoot[:]...))
+	return common.BytesToHash(root)
+}
+
+func WritePrivateStateRoot(db ethdb.Database, blockRoot, root common.Hash) error {
+	return db.Put(append(privateRootPrefix, blockRoot[:]...), root[:])
 }

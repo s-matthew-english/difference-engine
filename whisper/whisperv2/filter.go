@@ -116,11 +116,14 @@ func (self filterer) Compare(f filter.Filter) bool {
 	topics := make([]Topic, len(filter.matcher.conditions))
 	for i, group := range filter.matcher.conditions {
 		// Message should contain a single topic entry, extract
-		for topics[i] = range group {
+		for topics[i], _ = range group {
 			break
 		}
 	}
-	return self.matcher.Matches(topics)
+	if !self.matcher.Matches(topics) {
+		return false
+	}
+	return true
 }
 
 // Trigger is called when a filter successfully matches an inbound message.

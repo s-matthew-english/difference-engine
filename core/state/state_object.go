@@ -87,14 +87,8 @@ type StateObject struct {
 	// during the "update" phase of the state transition.
 	dirtyCode bool // true if the code was updated
 	suicided  bool
-	touched   bool
 	deleted   bool
 	onDirty   func(addr common.Address) // Callback method to mark a state object newly dirty
-}
-
-// empty returns whether the account is considered empty.
-func (s *StateObject) empty() bool {
-	return s.data.Nonce == 0 && s.data.Balance.BitLen() == 0 && bytes.Equal(s.data.CodeHash, emptyCodeHash)
 }
 
 // Account is the Ethereum consensus representation of accounts.
@@ -140,18 +134,6 @@ func (self *StateObject) markSuicided() {
 	}
 }
 
-func (c *StateObject) touch() {
-	c.db.journal = append(c.db.journal, touchChange{
-		account: &c.address,
-		prev:    c.touched,
-	})
-	if c.onDirty != nil {
-		c.onDirty(c.Address())
-		c.onDirty = nil
-	}
-	c.touched = true
-}
-
 func (c *StateObject) getTrie(db trie.Database) *trie.SecureTrie {
 	if c.trie == nil {
 		var err error
@@ -162,6 +144,10 @@ func (c *StateObject) getTrie(db trie.Database) *trie.SecureTrie {
 		}
 	}
 	return c.trie
+}
+
+func (so *StateObject) storageRoot(db trie.Database) common.Hash {
+	return so.getTrie(db).Hash()
 }
 
 // GetState returns a value in account storage.
@@ -239,16 +225,8 @@ func (self *StateObject) CommitTrie(db trie.Database, dbw trie.DatabaseWriter) e
 	return err
 }
 
-// AddBalance removes amount from c's balance.
-// It is used to add funds to the destination account of a transfer.
 func (c *StateObject) AddBalance(amount *big.Int) {
-	// EIP158: We must check emptiness for the objects such that the account
-	// clearing (0,0,0 objects) can take effect.
 	if amount.Cmp(common.Big0) == 0 {
-		if c.empty() {
-			c.touch()
-		}
-
 		return
 	}
 	c.SetBalance(new(big.Int).Add(c.Balance(), amount))
@@ -258,8 +236,6 @@ func (c *StateObject) AddBalance(amount *big.Int) {
 	}
 }
 
-// SubBalance removes amount from c's balance.
-// It is used to remove funds from the origin account of a transfer.
 func (c *StateObject) SubBalance(amount *big.Int) {
 	if amount.Cmp(common.Big0) == 0 {
 		return
@@ -288,7 +264,7 @@ func (self *StateObject) setBalance(amount *big.Int) {
 }
 
 // Return the gas back to the origin. Used by the Virtual machine or Closures
-func (c *StateObject) ReturnGas(gas *big.Int) {}
+func (c *StateObject) ReturnGas(gas, price *big.Int) {}
 
 func (self *StateObject) deepCopy(db *StateDB, onDirty func(addr common.Address)) *StateObject {
 	stateObject := newObject(db, self.address, self.data, onDirty)

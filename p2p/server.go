@@ -28,9 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/p2p/discover"
-	"github.com/ethereum/go-ethereum/p2p/discv5"
 	"github.com/ethereum/go-ethereum/p2p/nat"
-	"github.com/ethereum/go-ethereum/p2p/netutil"
 )
 
 const (
@@ -54,6 +52,8 @@ const (
 
 var errServerStopped = errors.New("server stopped")
 
+var srvjslog = logger.NewJsonLogger()
+
 // Config holds Server options.
 type Config struct {
 	// This field must be set to a valid secp256k1 private key.
@@ -72,25 +72,13 @@ type Config struct {
 	// or not. Disabling is usually useful for protocol debugging (manual topology).
 	Discovery bool
 
-	// DiscoveryV5 specifies whether the the new topic-discovery based V5 discovery
-	// protocol should be started or not.
-	DiscoveryV5 bool
-
-	// Listener address for the V5 discovery protocol UDP traffic.
-	DiscoveryV5Addr string
-
 	// Name sets the node name of this server.
 	// Use common.MakeName to create a name that follows existing conventions.
 	Name string
 
-	// BootstrapNodes are used to establish connectivity
+	// Bootstrap nodes are used to establish connectivity
 	// with the rest of the network.
 	BootstrapNodes []*discover.Node
-
-	// BootstrapNodesV5 are used to establish connectivity
-	// with the rest of the network using the V5 discovery
-	// protocol.
-	BootstrapNodesV5 []*discv5.Node
 
 	// Static nodes are used as pre-configured connections which are always
 	// maintained and re-connected on disconnects.
@@ -99,11 +87,6 @@ type Config struct {
 	// Trusted nodes are used as pre-configured connections which are always
 	// allowed to connect, even above the peer limit.
 	TrustedNodes []*discover.Node
-
-	// Connectivity can be restricted to certain IP networks.
-	// If this option is set to a non-nil value, only hosts which match one of the
-	// IP networks contained in the list are considered.
-	NetRestrict *netutil.Netlist
 
 	// NodeDatabase is the path to the database containing the previously seen
 	// live nodes in the network.
@@ -133,6 +116,12 @@ type Config struct {
 
 	// If NoDial is true, the server will not dial any peers.
 	NoDial bool
+
+	//Enables Permissioning
+	EnableNodePermission bool
+
+	//DataDir
+	DataDir string
 }
 
 // Server manages all peer connections.
@@ -152,7 +141,6 @@ type Server struct {
 	listener     net.Listener
 	ourHandshake *protoHandshake
 	lastLookup   time.Time
-	DiscV5       *discv5.Network
 
 	// These are for Peers, PeerCount (and nothing else).
 	peerOp     chan peerOpFunc
@@ -360,7 +348,7 @@ func (srv *Server) Start() (err error) {
 
 	// node table
 	if srv.Discovery {
-		ntab, err := discover.ListenUDP(srv.PrivateKey, srv.ListenAddr, srv.NAT, srv.NodeDatabase, srv.NetRestrict)
+		ntab, err := discover.ListenUDP(srv.PrivateKey, srv.ListenAddr, srv.NAT, srv.NodeDatabase)
 		if err != nil {
 			return err
 		}
@@ -370,22 +358,11 @@ func (srv *Server) Start() (err error) {
 		srv.ntab = ntab
 	}
 
-	if srv.DiscoveryV5 {
-		ntab, err := discv5.ListenUDP(srv.PrivateKey, srv.DiscoveryV5Addr, srv.NAT, "", srv.NetRestrict) //srv.NodeDatabase)
-		if err != nil {
-			return err
-		}
-		if err := ntab.SetFallbackNodes(srv.BootstrapNodesV5); err != nil {
-			return err
-		}
-		srv.DiscV5 = ntab
-	}
-
 	dynPeers := (srv.MaxPeers + 1) / 2
 	if !srv.Discovery {
 		dynPeers = 0
 	}
-	dialer := newDialState(srv.StaticNodes, srv.ntab, dynPeers, srv.NetRestrict)
+	dialer := newDialState(srv.StaticNodes, srv.ntab, dynPeers)
 
 	// handshake
 	srv.ourHandshake = &protoHandshake{Version: baseProtocolVersion, Name: srv.Name, ID: discover.PubkeyID(&srv.PrivateKey.PublicKey)}
@@ -556,9 +533,6 @@ running:
 	if srv.ntab != nil {
 		srv.ntab.Close()
 	}
-	if srv.DiscV5 != nil {
-		srv.DiscV5.Close()
-	}
 	// Disconnect all peers.
 	for _, p := range peers {
 		p.Disconnect(DiscQuitting)
@@ -638,19 +612,8 @@ func (srv *Server) listenLoop() {
 			}
 			break
 		}
-
-		// Reject connections that do not match NetRestrict.
-		if srv.NetRestrict != nil {
-			if tcp, ok := fd.RemoteAddr().(*net.TCPAddr); ok && !srv.NetRestrict.Contains(tcp.IP) {
-				glog.V(logger.Debug).Infof("Rejected conn %v because it is not whitelisted in NetRestrict", fd.RemoteAddr())
-				fd.Close()
-				slots <- struct{}{}
-				continue
-			}
-		}
-
 		fd = newMeteredConn(fd, true)
-		glog.V(logger.Debug).Infof("Accepted conn %v", fd.RemoteAddr())
+		glog.V(logger.Debug).Infof("Accepted conn %v\n", fd.RemoteAddr())
 
 		// Spawn the handler. It will give the slot back when the connection
 		// has been established.
@@ -681,6 +644,30 @@ func (srv *Server) setupConn(fd net.Conn, flags connFlag, dialDest *discover.Nod
 		c.close(err)
 		return
 	}
+	//START - QUORUM Permissioning
+	currentNode := srv.NodeInfo().ID
+	cnodeName := srv.NodeInfo().Name
+	glog.V(logger.Debug).Infof("EnableNodePermission <%v>, DataDir <%v>, Current Node ID <%v>, Node Name <%v>, Dialed Dest<%v>, Connection ID <%v>, Connection String <%v> ", srv.EnableNodePermission, srv.DataDir, currentNode, cnodeName, dialDest, c.id, c.id.String())
+
+	if srv.EnableNodePermission {
+		glog.V(logger.Debug).Infof("Node Permissioning is Enabled. ")
+		node := c.id.String()
+		direction := "INCOMING"
+		if dialDest != nil {
+			node = dialDest.ID.String()
+			direction = "OUTGOING"
+			glog.V(logger.Debug).Infof("Connection Direction <%v>", direction)
+		}
+
+		if !isNodePermissioned(node, currentNode, srv.DataDir, direction) {
+			return
+		}
+	} else {
+		glog.V(logger.Debug).Infof("Node Permissioning is Disabled. ")
+	}
+
+	//END - QUORUM Permissioning
+
 	// For dialed connections, check that the remote public key matches.
 	if dialDest != nil && c.id != dialDest.ID {
 		c.close(DiscUnexpectedIdentity)
@@ -735,6 +722,12 @@ func (srv *Server) checkpoint(c *conn, stage chan<- *conn) error {
 // the peer.
 func (srv *Server) runPeer(p *Peer) {
 	glog.V(logger.Debug).Infof("Added %v\n", p)
+	srvjslog.LogJson(&logger.P2PConnected{
+		RemoteId:            p.ID().String(),
+		RemoteAddress:       p.RemoteAddr().String(),
+		RemoteVersionString: p.Name(),
+		NumConnections:      srv.PeerCount(),
+	})
 
 	if srv.newPeerHook != nil {
 		srv.newPeerHook(p)
@@ -745,6 +738,10 @@ func (srv *Server) runPeer(p *Peer) {
 	srv.delpeer <- p
 
 	glog.V(logger.Debug).Infof("Removed %v (%v)\n", p, discreason)
+	srvjslog.LogJson(&logger.P2PDisconnected{
+		RemoteId:       p.ID().String(),
+		NumConnections: srv.PeerCount(),
+	})
 }
 
 // NodeInfo represents a short summary of the information known about the host.
@@ -761,7 +758,7 @@ type NodeInfo struct {
 	Protocols  map[string]interface{} `json:"protocols"`
 }
 
-// NodeInfo gathers and returns a collection of metadata known about the host.
+// Info gathers and returns a collection of metadata known about the host.
 func (srv *Server) NodeInfo() *NodeInfo {
 	node := srv.Self()
 

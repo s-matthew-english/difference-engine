@@ -43,12 +43,12 @@ func InitDebugTest(i int64) {
 
 type FilterTestCase struct {
 	f      *Filter
-	id     uint32
+	id     int
 	alive  bool
 	msgCnt int
 }
 
-func generateFilter(t *testing.T, symmetric bool) (*Filter, error) {
+func generateFilter(x *testing.T, symmetric bool) (*Filter, error) {
 	var f Filter
 	f.Messages = make(map[common.Hash]*ReceivedMessage)
 
@@ -61,7 +61,7 @@ func generateFilter(t *testing.T, symmetric bool) (*Filter, error) {
 
 	key, err := crypto.GenerateKey()
 	if err != nil {
-		t.Fatalf("generateFilter 1 failed with seed %d.", seed)
+		x.Errorf("generateFilter failed 1 with seed %d.", seed)
 		return nil, err
 	}
 	f.Src = &key.PublicKey
@@ -73,7 +73,7 @@ func generateFilter(t *testing.T, symmetric bool) (*Filter, error) {
 	} else {
 		f.KeyAsym, err = crypto.GenerateKey()
 		if err != nil {
-			t.Fatalf("generateFilter 2 failed with seed %d.", seed)
+			x.Errorf("generateFilter failed 2 with seed %d.", seed)
 			return nil, err
 		}
 	}
@@ -82,94 +82,105 @@ func generateFilter(t *testing.T, symmetric bool) (*Filter, error) {
 	return &f, nil
 }
 
-func generateTestCases(t *testing.T, SizeTestFilters int) []FilterTestCase {
+func generateTestCases(x *testing.T, SizeTestFilters int) []FilterTestCase {
 	cases := make([]FilterTestCase, SizeTestFilters)
 	for i := 0; i < SizeTestFilters; i++ {
-		f, _ := generateFilter(t, true)
+		f, _ := generateFilter(x, true)
 		cases[i].f = f
 		cases[i].alive = (rand.Int()&int(1) == 0)
 	}
 	return cases
 }
 
-func TestInstallFilters(t *testing.T) {
+func TestInstallFilters(x *testing.T) {
 	InitSingleTest()
 
 	const SizeTestFilters = 256
 	w := NewWhisper(nil)
 	filters := NewFilters(w)
-	tst := generateTestCases(t, SizeTestFilters)
+	tst := generateTestCases(x, SizeTestFilters)
 
-	var j uint32
+	var j int
 	for i := 0; i < SizeTestFilters; i++ {
 		j = filters.Install(tst[i].f)
 		tst[i].id = j
 	}
 
 	if j < SizeTestFilters-1 {
-		t.Fatalf("seed %d: wrong index %d", seed, j)
+		x.Errorf("seed %d: wrong index %d", seed, j)
+		return
 	}
 
-	for _, testCase := range tst {
-		if !testCase.alive {
-			filters.Uninstall(testCase.id)
+	for _, t := range tst {
+		if !t.alive {
+			filters.Uninstall(t.id)
 		}
 	}
 
-	for i, testCase := range tst {
-		fil := filters.Get(testCase.id)
+	for i, t := range tst {
+		fil := filters.Get(t.id)
 		exist := (fil != nil)
-		if exist != testCase.alive {
-			t.Fatalf("seed %d: failed alive: %d, %v, %v", seed, i, exist, testCase.alive)
+		if exist != t.alive {
+			x.Errorf("seed %d: failed alive: %d, %v, %v", seed, i, exist, t.alive)
+			return
 		}
-		if exist && fil.PoW != testCase.f.PoW {
-			t.Fatalf("seed %d: failed Get: %d, %v, %v", seed, i, exist, testCase.alive)
+		if exist && fil.PoW != t.f.PoW {
+			x.Errorf("seed %d: failed Get: %d, %v, %v", seed, i, exist, t.alive)
+			return
 		}
 	}
 }
 
-func TestComparePubKey(t *testing.T) {
+func TestComparePubKey(x *testing.T) {
 	InitSingleTest()
 
 	key1, err := crypto.GenerateKey()
 	if err != nil {
-		t.Fatalf("failed to generate first key with seed %d: %s.", seed, err)
+		x.Errorf("failed GenerateKey 1 with seed %d: %s.", seed, err)
+		return
 	}
 	key2, err := crypto.GenerateKey()
 	if err != nil {
-		t.Fatalf("failed to generate second key with seed %d: %s.", seed, err)
+		x.Errorf("failed GenerateKey 2 with seed %d: %s.", seed, err)
+		return
 	}
-	if IsPubKeyEqual(&key1.PublicKey, &key2.PublicKey) {
-		t.Fatalf("public keys are equal, seed %d.", seed)
+	if isPubKeyEqual(&key1.PublicKey, &key2.PublicKey) {
+		x.Errorf("failed !equal with seed %d.", seed)
+		return
 	}
 
 	// generate key3 == key1
 	rand.Seed(seed)
 	key3, err := crypto.GenerateKey()
 	if err != nil {
-		t.Fatalf("failed to generate third key with seed %d: %s.", seed, err)
+		x.Errorf("failed GenerateKey 3 with seed %d: %s.", seed, err)
+		return
 	}
-	if IsPubKeyEqual(&key1.PublicKey, &key3.PublicKey) {
-		t.Fatalf("key1 == key3, seed %d.", seed)
+	if isPubKeyEqual(&key1.PublicKey, &key3.PublicKey) {
+		x.Errorf("failed equal with seed %d.", seed)
+		return
 	}
 }
 
-func TestMatchEnvelope(t *testing.T) {
+func TestMatchEnvelope(x *testing.T) {
 	InitSingleTest()
 
-	fsym, err := generateFilter(t, true)
+	fsym, err := generateFilter(x, true)
 	if err != nil {
-		t.Fatalf("failed generateFilter with seed %d: %s.", seed, err)
+		x.Errorf("failed generateFilter 1 with seed %d: %s.", seed, err)
+		return
 	}
 
-	fasym, err := generateFilter(t, false)
+	fasym, err := generateFilter(x, false)
 	if err != nil {
-		t.Fatalf("failed generateFilter() with seed %d: %s.", seed, err)
+		x.Errorf("failed generateFilter 2 with seed %d: %s.", seed, err)
+		return
 	}
 
 	params, err := generateMessageParams()
 	if err != nil {
-		t.Fatalf("failed generateMessageParams with seed %d: %s.", seed, err)
+		x.Errorf("failed generateMessageParams 3 with seed %d: %s.", seed, err)
+		return
 	}
 
 	params.Topic[0] = 0xFF // ensure mismatch
@@ -178,15 +189,18 @@ func TestMatchEnvelope(t *testing.T) {
 	msg := NewSentMessage(params)
 	env, err := msg.Wrap(params)
 	if err != nil {
-		t.Fatalf("failed Wrap with seed %d: %s.", seed, err)
+		x.Errorf("failed Wrap 4 with seed %d: %s.", seed, err)
+		return
 	}
 	match := fsym.MatchEnvelope(env)
 	if match {
-		t.Fatalf("failed MatchEnvelope symmetric with seed %d.", seed)
+		x.Errorf("failed test case 5 with seed %d.", seed)
+		return
 	}
 	match = fasym.MatchEnvelope(env)
 	if match {
-		t.Fatalf("failed MatchEnvelope asymmetric with seed %d.", seed)
+		x.Errorf("failed test case 6 with seed %d.", seed)
+		return
 	}
 
 	// encrypt symmetrically
@@ -196,123 +210,125 @@ func TestMatchEnvelope(t *testing.T) {
 	msg = NewSentMessage(params)
 	env, err = msg.Wrap(params)
 	if err != nil {
-		t.Fatalf("failed Wrap() with seed %d: %s.", seed, err)
+		x.Errorf("failed test case 7 with seed %d, test case 3: %s.", seed, err)
+		return
 	}
 
 	// symmetric + matching topic: match
 	match = fsym.MatchEnvelope(env)
 	if !match {
-		t.Fatalf("failed MatchEnvelope() symmetric with seed %d.", seed)
+		x.Errorf("failed test case 8 with seed %d.", seed)
+		return
 	}
 
 	// asymmetric + matching topic: mismatch
 	match = fasym.MatchEnvelope(env)
 	if match {
-		t.Fatalf("failed MatchEnvelope() asymmetric with seed %d.", seed)
+		x.Errorf("failed test case 9 with seed %d.", seed)
+		return
 	}
 
 	// symmetric + matching topic + insufficient PoW: mismatch
 	fsym.PoW = env.PoW() + 1.0
 	match = fsym.MatchEnvelope(env)
 	if match {
-		t.Fatalf("failed MatchEnvelope(symmetric + matching topic + insufficient PoW) asymmetric with seed %d.", seed)
+		x.Errorf("failed test case 10 with seed %d.", seed)
+		return
 	}
 
 	// symmetric + matching topic + sufficient PoW: match
 	fsym.PoW = env.PoW() / 2
 	match = fsym.MatchEnvelope(env)
 	if !match {
-		t.Fatalf("failed MatchEnvelope(symmetric + matching topic + sufficient PoW) with seed %d.", seed)
+		x.Errorf("failed test case 11 with seed %d.", seed)
+		return
 	}
 
-	// symmetric + topics are nil (wildcard): match
+	// symmetric + topics are nil: mismatch
 	prevTopics := fsym.Topics
 	fsym.Topics = nil
-	match = fsym.MatchEnvelope(env)
-	if !match {
-		t.Fatalf("failed MatchEnvelope(symmetric + topics are nil) with seed %d.", seed)
+	match = fasym.MatchEnvelope(env)
+	if match {
+		x.Errorf("failed test case 12 with seed %d.", seed)
+		return
 	}
 	fsym.Topics = prevTopics
 
 	// encrypt asymmetrically
 	key, err := crypto.GenerateKey()
 	if err != nil {
-		t.Fatalf("failed GenerateKey with seed %d: %s.", seed, err)
+		x.Errorf("failed GenerateKey 13 with seed %d: %s.", seed, err)
+		return
 	}
 	params.KeySym = nil
 	params.Dst = &key.PublicKey
 	msg = NewSentMessage(params)
 	env, err = msg.Wrap(params)
 	if err != nil {
-		t.Fatalf("failed Wrap() with seed %d: %s.", seed, err)
+		x.Errorf("failed test case 14 with seed %d, test case 3: %s.", seed, err)
+		return
 	}
 
 	// encryption method mismatch
 	match = fsym.MatchEnvelope(env)
 	if match {
-		t.Fatalf("failed MatchEnvelope(encryption method mismatch) with seed %d.", seed)
+		x.Errorf("failed test case 15 with seed %d.", seed)
+		return
 	}
 
 	// asymmetric + mismatching topic: mismatch
 	match = fasym.MatchEnvelope(env)
 	if !match {
-		t.Fatalf("failed MatchEnvelope(asymmetric + mismatching topic) with seed %d.", seed)
+		x.Errorf("failed test case 16 with seed %d.", seed)
+		return
 	}
 
 	// asymmetric + matching topic: match
 	fasym.Topics[i] = fasym.Topics[i+1]
 	match = fasym.MatchEnvelope(env)
 	if match {
-		t.Fatalf("failed MatchEnvelope(asymmetric + matching topic) with seed %d.", seed)
+		x.Errorf("failed test case 17 with seed %d.", seed)
+		return
 	}
 
-	// asymmetric + filter without topic (wildcard): match
+	// asymmetric + topic is nil (wildcard): match
 	fasym.Topics = nil
 	match = fasym.MatchEnvelope(env)
 	if !match {
-		t.Fatalf("failed MatchEnvelope(asymmetric + filter without topic) with seed %d.", seed)
+		x.Errorf("failed test case 18 with seed %d.", seed)
+		return
 	}
 
 	// asymmetric + insufficient PoW: mismatch
 	fasym.PoW = env.PoW() + 1.0
 	match = fasym.MatchEnvelope(env)
 	if match {
-		t.Fatalf("failed MatchEnvelope(asymmetric + insufficient PoW) with seed %d.", seed)
+		x.Errorf("failed test case 19 with seed %d.", seed)
+		return
 	}
 
 	// asymmetric + sufficient PoW: match
 	fasym.PoW = env.PoW() / 2
 	match = fasym.MatchEnvelope(env)
 	if !match {
-		t.Fatalf("failed MatchEnvelope(asymmetric + sufficient PoW) with seed %d.", seed)
-	}
-
-	// filter without topic + envelope without topic: match
-	env.Topic = TopicType{}
-	match = fasym.MatchEnvelope(env)
-	if !match {
-		t.Fatalf("failed MatchEnvelope(filter without topic + envelope without topic) with seed %d.", seed)
-	}
-
-	// filter with topic + envelope without topic: mismatch
-	fasym.Topics = fsym.Topics
-	match = fasym.MatchEnvelope(env)
-	if match {
-		t.Fatalf("failed MatchEnvelope(filter without topic + envelope without topic) with seed %d.", seed)
+		x.Errorf("failed test case 20 with seed %d.", seed)
+		return
 	}
 }
 
-func TestMatchMessageSym(t *testing.T) {
+func TestMatchMessageSym(x *testing.T) {
 	InitSingleTest()
 
 	params, err := generateMessageParams()
 	if err != nil {
-		t.Fatalf("failed generateMessageParams with seed %d: %s.", seed, err)
+		x.Errorf("failed generateMessageParams with seed %d: %s.", seed, err)
+		return
 	}
 
-	f, err := generateFilter(t, true)
+	f, err := generateFilter(x, true)
 	if err != nil {
-		t.Fatalf("failed generateFilter with seed %d: %s.", seed, err)
+		x.Errorf("failed generateFilter 1 with seed %d: %s.", seed, err)
+		return
 	}
 
 	const index = 1
@@ -322,91 +338,106 @@ func TestMatchMessageSym(t *testing.T) {
 	sentMessage := NewSentMessage(params)
 	env, err := sentMessage.Wrap(params)
 	if err != nil {
-		t.Fatalf("failed Wrap with seed %d: %s.", seed, err)
+		x.Errorf("failed Wrap 2 with seed %d: %s.", seed, err)
+		return
 	}
 
 	msg := env.Open(f)
 	if msg == nil {
-		t.Fatalf("failed Open with seed %d.", seed)
+		x.Errorf("failed to open 3 with seed %d.", seed)
+		return
 	}
 
 	// Src mismatch
 	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchMessage(src mismatch) with seed %d.", seed)
+		x.Errorf("failed test case 4 with seed %d.", seed)
+		return
 	}
 
 	// Src: match
 	*f.Src.X = *params.Src.PublicKey.X
 	*f.Src.Y = *params.Src.PublicKey.Y
 	if !f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(src match) with seed %d.", seed)
+		x.Errorf("failed test case 5 with seed %d.", seed)
+		return
 	}
 
 	// insufficient PoW: mismatch
 	f.PoW = msg.PoW + 1.0
 	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(insufficient PoW) with seed %d.", seed)
+		x.Errorf("failed test case 6 with seed %d.", seed)
+		return
 	}
 
 	// sufficient PoW: match
 	f.PoW = msg.PoW / 2
 	if !f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(sufficient PoW) with seed %d.", seed)
+		x.Errorf("failed test case 7 with seed %d.", seed)
+		return
 	}
 
 	// topic mismatch
 	f.Topics[index][0]++
 	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(topic mismatch) with seed %d.", seed)
+		x.Errorf("failed test case 8 with seed %d.", seed)
+		return
 	}
 	f.Topics[index][0]--
 
 	// key mismatch
 	f.SymKeyHash[0]++
 	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(key mismatch) with seed %d.", seed)
+		x.Errorf("failed test case 9 with seed %d.", seed)
+		return
 	}
 	f.SymKeyHash[0]--
 
 	// Src absent: match
 	f.Src = nil
 	if !f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(src absent) with seed %d.", seed)
+		x.Errorf("failed test case 10 with seed %d.", seed)
+		return
 	}
 
-	// key hash mismatch
+	// key hash mismatch mismatch
 	h := f.SymKeyHash
 	f.SymKeyHash = common.Hash{}
 	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(key hash mismatch) with seed %d.", seed)
+		x.Errorf("failed test case 11 with seed %d.", seed)
+		return
 	}
 	f.SymKeyHash = h
 	if !f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(key hash match) with seed %d.", seed)
+		x.Errorf("failed test case 12 with seed %d.", seed)
+		return
 	}
 
 	// encryption method mismatch
 	f.KeySym = nil
 	f.KeyAsym, err = crypto.GenerateKey()
 	if err != nil {
-		t.Fatalf("failed GenerateKey with seed %d: %s.", seed, err)
+		x.Errorf("failed GenerateKey 13 with seed %d: %s.", seed, err)
+		return
 	}
 	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(encryption method mismatch) with seed %d.", seed)
+		x.Errorf("failed test case 14 with seed %d.", seed)
+		return
 	}
 }
 
-func TestMatchMessageAsym(t *testing.T) {
+func TestMatchMessageAsym(x *testing.T) {
 	InitSingleTest()
 
-	f, err := generateFilter(t, false)
+	f, err := generateFilter(x, false)
 	if err != nil {
-		t.Fatalf("failed generateFilter with seed %d: %s.", seed, err)
+		x.Errorf("failed generateFilter with seed %d: %s.", seed, err)
+		return
 	}
 
 	params, err := generateMessageParams()
 	if err != nil {
-		t.Fatalf("failed generateMessageParams with seed %d: %s.", seed, err)
+		x.Errorf("failed generateMessageParams with seed %d: %s.", seed, err)
+		return
 	}
 
 	const index = 1
@@ -418,42 +449,50 @@ func TestMatchMessageAsym(t *testing.T) {
 	sentMessage := NewSentMessage(params)
 	env, err := sentMessage.Wrap(params)
 	if err != nil {
-		t.Fatalf("failed Wrap with seed %d: %s.", seed, err)
+		x.Errorf("failed Wrap with seed %d: %s.", seed, err)
+		return
 	}
 
 	msg := env.Open(f)
 	if msg == nil {
-		t.Fatalf("failed to open with seed %d.", seed)
+		x.Errorf("failed to open with seed %d.", seed)
+		return
 	}
 
 	// Src mismatch
 	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchMessage(src mismatch) with seed %d.", seed)
+		x.Errorf("failed test case 4 with seed %d.", seed)
+		return
 	}
 
 	// Src: match
 	*f.Src.X = *params.Src.PublicKey.X
 	*f.Src.Y = *params.Src.PublicKey.Y
 	if !f.MatchMessage(msg) {
-		t.Fatalf("failed MatchMessage(src match) with seed %d.", seed)
+		x.Errorf("failed test case 5 with seed %d.", seed)
+		return
 	}
 
 	// insufficient PoW: mismatch
 	f.PoW = msg.PoW + 1.0
 	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(insufficient PoW) with seed %d.", seed)
+		x.Errorf("failed test case 6 with seed %d.", seed)
+		return
 	}
 
 	// sufficient PoW: match
 	f.PoW = msg.PoW / 2
 	if !f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(sufficient PoW) with seed %d.", seed)
+		x.Errorf("failed test case 7 with seed %d.", seed)
+		return
 	}
 
-	// topic mismatch
+	// topic mismatch, but still match, because for asymmetric encryption
+	// only private key matters (in case the message is already decrypted)
 	f.Topics[index][0]++
-	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(topic mismatch) with seed %d.", seed)
+	if !f.MatchMessage(msg) {
+		x.Errorf("failed test case 8 with seed %d.", seed)
+		return
 	}
 	f.Topics[index][0]--
 
@@ -462,21 +501,24 @@ func TestMatchMessageAsym(t *testing.T) {
 	zero := *big.NewInt(0)
 	*f.KeyAsym.PublicKey.X = zero
 	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(key mismatch) with seed %d.", seed)
+		x.Errorf("failed test case 9 with seed %d.", seed)
+		return
 	}
 	*f.KeyAsym.PublicKey.X = prev
 
 	// Src absent: match
 	f.Src = nil
 	if !f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(src absent) with seed %d.", seed)
+		x.Errorf("failed test case 10 with seed %d.", seed)
+		return
 	}
 
 	// encryption method mismatch
 	f.KeySym = keySymOrig
 	f.KeyAsym = nil
 	if f.MatchMessage(msg) {
-		t.Fatalf("failed MatchEnvelope(encryption method mismatch) with seed %d.", seed)
+		x.Errorf("failed test case 11 with seed %d.", seed)
+		return
 	}
 }
 
@@ -493,10 +535,10 @@ func cloneFilter(orig *Filter) *Filter {
 	return &clone
 }
 
-func generateCompatibeEnvelope(t *testing.T, f *Filter) *Envelope {
+func generateCompatibeEnvelope(x *testing.T, f *Filter) *Envelope {
 	params, err := generateMessageParams()
 	if err != nil {
-		t.Fatalf("failed generateMessageParams with seed %d: %s.", seed, err)
+		x.Errorf("failed generateMessageParams 77 with seed %d: %s.", seed, err)
 		return nil
 	}
 
@@ -505,24 +547,23 @@ func generateCompatibeEnvelope(t *testing.T, f *Filter) *Envelope {
 	sentMessage := NewSentMessage(params)
 	env, err := sentMessage.Wrap(params)
 	if err != nil {
-		t.Fatalf("failed Wrap with seed %d: %s.", seed, err)
+		x.Errorf("failed Wrap 78 with seed %d: %s.", seed, err)
 		return nil
 	}
 	return env
 }
 
-func TestWatchers(t *testing.T) {
+func TestWatchers(x *testing.T) {
 	InitSingleTest()
 
 	const NumFilters = 16
 	const NumMessages = 256
-	var i int
-	var j uint32
+	var i, j int
 	var e *Envelope
 
 	w := NewWhisper(nil)
 	filters := NewFilters(w)
-	tst := generateTestCases(t, NumFilters)
+	tst := generateTestCases(x, NumFilters)
 	for i = 0; i < NumFilters; i++ {
 		tst[i].f.Src = nil
 		j = filters.Install(tst[i].f)
@@ -533,14 +574,14 @@ func TestWatchers(t *testing.T) {
 
 	var envelopes [NumMessages]*Envelope
 	for i = 0; i < NumMessages; i++ {
-		j = rand.Uint32() % NumFilters
-		e = generateCompatibeEnvelope(t, tst[j].f)
+		j = rand.Int() % NumFilters
+		e = generateCompatibeEnvelope(x, tst[j].f)
 		envelopes[i] = e
 		tst[j].msgCnt++
 	}
 
 	for i = 0; i < NumMessages; i++ {
-		filters.NotifyWatchers(envelopes[i], false)
+		filters.NotifyWatchers(envelopes[i], messagesCode)
 	}
 
 	var total int
@@ -554,17 +595,20 @@ func TestWatchers(t *testing.T) {
 	}
 
 	if total != NumMessages {
-		t.Fatalf("failed with seed %d: total = %d, want: %d.", seed, total, NumMessages)
+		x.Errorf("failed test case 1 with seed %d: total = %d, want: %d.", seed, total, NumMessages)
+		return
 	}
 
 	for i = 0; i < NumFilters; i++ {
 		mail = tst[i].f.Retrieve()
 		if len(mail) != 0 {
-			t.Fatalf("failed with seed %d: i = %d.", seed, i)
+			x.Errorf("failed test case 2 with seed %d: i = %d.", seed, i)
+			return
 		}
 
 		if tst[i].msgCnt != count[i] {
-			t.Fatalf("failed with seed %d: count[%d]: get %d, want %d.", seed, i, tst[i].msgCnt, count[i])
+			x.Errorf("failed test case 3 with seed %d: i = %d, get %d, want %d.", seed, i, tst[i].msgCnt, count[i])
+			return
 		}
 	}
 
@@ -582,18 +626,18 @@ func TestWatchers(t *testing.T) {
 	}
 
 	// make sure that the first watcher receives at least one message
-	e = generateCompatibeEnvelope(t, tst[0].f)
+	e = generateCompatibeEnvelope(x, tst[0].f)
 	envelopes[0] = e
 	tst[0].msgCnt++
 	for i = 1; i < NumMessages; i++ {
-		j = rand.Uint32() % NumFilters
-		e = generateCompatibeEnvelope(t, tst[j].f)
+		j = rand.Int() % NumFilters
+		e = generateCompatibeEnvelope(x, tst[j].f)
 		envelopes[i] = e
 		tst[j].msgCnt++
 	}
 
 	for i = 0; i < NumMessages; i++ {
-		filters.NotifyWatchers(envelopes[i], false)
+		filters.NotifyWatchers(envelopes[i], messagesCode)
 	}
 
 	for i = 0; i < NumFilters; i++ {
@@ -604,32 +648,37 @@ func TestWatchers(t *testing.T) {
 
 	combined := tst[0].msgCnt + tst[last].msgCnt
 	if total != NumMessages+count[0] {
-		t.Fatalf("failed with seed %d: total = %d, count[0] = %d.", seed, total, count[0])
+		x.Errorf("failed test case 4 with seed %d: total = %d, count[0] = %d.", seed, total, count[0])
+		return
 	}
 
 	if combined != count[0] {
-		t.Fatalf("failed with seed %d: combined = %d, count[0] = %d.", seed, combined, count[0])
+		x.Errorf("failed test case 5 with seed %d: combined = %d, count[0] = %d.", seed, combined, count[0])
+		return
 	}
 
 	if combined != count[last] {
-		t.Fatalf("failed with seed %d: combined = %d, count[last] = %d.", seed, combined, count[last])
+		x.Errorf("failed test case 6 with seed %d: combined = %d, count[last] = %d.", seed, combined, count[last])
+		return
 	}
 
 	for i = 1; i < NumFilters-1; i++ {
 		mail = tst[i].f.Retrieve()
 		if len(mail) != 0 {
-			t.Fatalf("failed with seed %d: i = %d.", seed, i)
+			x.Errorf("failed test case 7 with seed %d: i = %d.", seed, i)
+			return
 		}
 
 		if tst[i].msgCnt != count[i] {
-			t.Fatalf("failed with seed %d: i = %d, get %d, want %d.", seed, i, tst[i].msgCnt, count[i])
+			x.Errorf("failed test case 8 with seed %d: i = %d, get %d, want %d.", seed, i, tst[i].msgCnt, count[i])
+			return
 		}
 	}
 
 	// test AcceptP2P
 
 	total = 0
-	filters.NotifyWatchers(envelopes[0], true)
+	filters.NotifyWatchers(envelopes[0], p2pCode)
 
 	for i = 0; i < NumFilters; i++ {
 		mail = tst[i].f.Retrieve()
@@ -637,16 +686,14 @@ func TestWatchers(t *testing.T) {
 	}
 
 	if total != 0 {
-		t.Fatalf("failed with seed %d: total: got %d, want 0.", seed, total)
+		x.Errorf("failed test case 9 with seed %d.", seed)
+		return
 	}
 
-	f := filters.Get(1)
-	if f == nil {
-		t.Fatalf("failed to get the filter with seed %d.", seed)
-	}
+	f := filters.Get(0)
 	f.AcceptP2P = true
 	total = 0
-	filters.NotifyWatchers(envelopes[0], true)
+	filters.NotifyWatchers(envelopes[0], p2pCode)
 
 	for i = 0; i < NumFilters; i++ {
 		mail = tst[i].f.Retrieve()
@@ -654,6 +701,7 @@ func TestWatchers(t *testing.T) {
 	}
 
 	if total != 1 {
-		t.Fatalf("failed with seed %d: total: got %d, want 1.", seed, total)
+		x.Errorf("failed test case 10 with seed %d: total = %d.", seed, total)
+		return
 	}
 }

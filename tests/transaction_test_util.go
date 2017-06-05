@@ -24,6 +24,7 @@ import (
 	"runtime"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/params"
@@ -50,7 +51,7 @@ type TransactionTest struct {
 	Transaction TtTransaction
 }
 
-func RunTransactionTestsWithReader(config *params.ChainConfig, r io.Reader, skipTests []string) error {
+func RunTransactionTestsWithReader(r io.Reader, skipTests []string) error {
 	skipTest := make(map[string]bool, len(skipTests))
 	for _, name := range skipTests {
 		skipTest[name] = true
@@ -68,7 +69,7 @@ func RunTransactionTestsWithReader(config *params.ChainConfig, r io.Reader, skip
 			return nil
 		}
 		// test the block
-		if err := runTransactionTest(config, test); err != nil {
+		if err := runTransactionTest(test); err != nil {
 			return err
 		}
 		glog.Infoln("Transaction test passed: ", name)
@@ -77,19 +78,19 @@ func RunTransactionTestsWithReader(config *params.ChainConfig, r io.Reader, skip
 	return nil
 }
 
-func RunTransactionTests(config *params.ChainConfig, file string, skipTests []string) error {
+func RunTransactionTests(file string, skipTests []string) error {
 	tests := make(map[string]TransactionTest)
 	if err := readJsonFile(file, &tests); err != nil {
 		return err
 	}
 
-	if err := runTransactionTests(config, tests, skipTests); err != nil {
+	if err := runTransactionTests(tests, skipTests); err != nil {
 		return err
 	}
 	return nil
 }
 
-func runTransactionTests(config *params.ChainConfig, tests map[string]TransactionTest, skipTests []string) error {
+func runTransactionTests(tests map[string]TransactionTest, skipTests []string) error {
 	skipTest := make(map[string]bool, len(skipTests))
 	for _, name := range skipTests {
 		skipTest[name] = true
@@ -103,7 +104,7 @@ func runTransactionTests(config *params.ChainConfig, tests map[string]Transactio
 		}
 
 		// test the block
-		if err := runTransactionTest(config, test); err != nil {
+		if err := runTransactionTest(test); err != nil {
 			return fmt.Errorf("%s: %v", name, err)
 		}
 		glog.Infoln("Transaction test passed: ", name)
@@ -112,7 +113,7 @@ func runTransactionTests(config *params.ChainConfig, tests map[string]Transactio
 	return nil
 }
 
-func runTransactionTest(config *params.ChainConfig, txTest TransactionTest) (err error) {
+func runTransactionTest(txTest TransactionTest) (err error) {
 	tx := new(types.Transaction)
 	err = rlp.DecodeBytes(mustConvertBytes(txTest.Rlp), tx)
 
@@ -126,7 +127,7 @@ func runTransactionTest(config *params.ChainConfig, txTest TransactionTest) (err
 		}
 	}
 
-	validationError := verifyTxFields(config, txTest, tx)
+	validationError := verifyTxFields(txTest, tx)
 	if txTest.Sender == "" {
 		if validationError != nil {
 			// RLP decoding works but validation should fail (test OK)
@@ -150,7 +151,7 @@ func runTransactionTest(config *params.ChainConfig, txTest TransactionTest) (err
 	return errors.New("Should not happen: verify RLP decoding and field validation")
 }
 
-func verifyTxFields(chainConfig *params.ChainConfig, txTest TransactionTest, decodedTx *types.Transaction) (err error) {
+func verifyTxFields(txTest TransactionTest, decodedTx *types.Transaction) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			buf := make([]byte, 64<<10)
@@ -159,17 +160,23 @@ func verifyTxFields(chainConfig *params.ChainConfig, txTest TransactionTest, dec
 		}
 	}()
 
-	var decodedSender common.Address
+	var (
+		decodedSender common.Address
+	)
 
-	signer := types.MakeSigner(chainConfig, common.String2Big(txTest.Blocknumber))
-	decodedSender, err = types.Sender(signer, decodedTx)
+	chainConfig := &core.ChainConfig{HomesteadBlock: params.MainNetHomesteadBlock}
+	if chainConfig.IsHomestead(common.String2Big(txTest.Blocknumber)) {
+		decodedSender, err = decodedTx.From()
+	} else {
+		decodedSender, err = decodedTx.FromFrontier()
+	}
 	if err != nil {
 		return err
 	}
 
 	expectedSender := mustConvertAddress(txTest.Sender)
 	if expectedSender != decodedSender {
-		return fmt.Errorf("Sender mismatch: %x %x", expectedSender, decodedSender)
+		return fmt.Errorf("Sender mismatch: %v %v", expectedSender, decodedSender)
 	}
 
 	expectedData := mustConvertBytes(txTest.Transaction.Data)
@@ -192,7 +199,7 @@ func verifyTxFields(chainConfig *params.ChainConfig, txTest TransactionTest, dec
 		return fmt.Errorf("Nonce mismatch: %v %v", expectedNonce, decodedTx.Nonce())
 	}
 
-	v, r, s := decodedTx.RawSignatureValues()
+	v, r, s := decodedTx.SignatureValues()
 	expectedR := mustConvertBigInt(txTest.Transaction.R, 16)
 	if r.Cmp(expectedR) != 0 {
 		return fmt.Errorf("R mismatch: %v %v", expectedR, r)
@@ -201,8 +208,8 @@ func verifyTxFields(chainConfig *params.ChainConfig, txTest TransactionTest, dec
 	if s.Cmp(expectedS) != 0 {
 		return fmt.Errorf("S mismatch: %v %v", expectedS, s)
 	}
-	expectedV := mustConvertBigInt(txTest.Transaction.V, 16)
-	if v.Cmp(expectedV) != 0 {
+	expectedV := mustConvertUint(txTest.Transaction.V, 16)
+	if uint64(v) != expectedV {
 		return fmt.Errorf("V mismatch: %v %v", expectedV, v)
 	}
 

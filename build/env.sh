@@ -19,9 +19,9 @@ if [ ! -L "$ethdir/go-ethereum" ]; then
 fi
 
 # Set up the environment to use the workspace.
+# Also add Godeps workspace so we build using canned dependencies.
 GOPATH="$workspace"
-GO15VENDOREXPERIMENT=1
-export GOPATH GO15VENDOREXPERIMENT
+export GOPATH
 
 # Run the command inside the workspace.
 cd "$ethdir/go-ethereum"

@@ -38,7 +38,7 @@ func initDbStore(t *testing.T) *DbStore {
 
 func testDbStore(l int64, branches int64, t *testing.T) {
 	m := initDbStore(t)
-	defer m.Close()
+	defer m.close()
 	testStore(m, l, branches, t)
 }
 
@@ -64,7 +64,7 @@ func TestDbStore2_100_(t *testing.T) {
 
 func TestDbStoreNotFound(t *testing.T) {
 	m := initDbStore(t)
-	defer m.Close()
+	defer m.close()
 	_, err := m.Get(ZeroKey)
 	if err != notFound {
 		t.Errorf("Expected notFound, got %v", err)
@@ -73,7 +73,7 @@ func TestDbStoreNotFound(t *testing.T) {
 
 func TestDbStoreSyncIterator(t *testing.T) {
 	m := initDbStore(t)
-	defer m.Close()
+	defer m.close()
 	keys := []Key{
 		Key(common.Hex2Bytes("0000000000000000000000000000000000000000000000000000000000000000")),
 		Key(common.Hex2Bytes("4000000000000000000000000000000000000000000000000000000000000000")),
@@ -144,7 +144,7 @@ func TestDbStoreSyncIterator(t *testing.T) {
 		t.Fatalf("unexpected error creating NewSyncIterator")
 	}
 
-	it, _ = m.NewSyncIterator(DbSyncState{
+	it, err = m.NewSyncIterator(DbSyncState{
 		Start: Key(common.Hex2Bytes("1000000000000000000000000000000000000000000000000000000000000000")),
 		Stop:  Key(common.Hex2Bytes("4000000000000000000000000000000000000000000000000000000000000000")),
 		First: 2,
@@ -168,7 +168,7 @@ func TestDbStoreSyncIterator(t *testing.T) {
 		t.Fatalf("Expected %v chunk, got %v", keys[3], res[1])
 	}
 
-	it, _ = m.NewSyncIterator(DbSyncState{
+	it, err = m.NewSyncIterator(DbSyncState{
 		Start: Key(common.Hex2Bytes("2000000000000000000000000000000000000000000000000000000000000000")),
 		Stop:  Key(common.Hex2Bytes("4000000000000000000000000000000000000000000000000000000000000000")),
 		First: 2,

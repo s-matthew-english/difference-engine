@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"github.com/ethereum/go-ethereum/params"
 )
 
 var (
@@ -57,13 +58,19 @@ var (
 	*/
 	TransSkipTests = []string{
 		"TransactionWithHihghNonce256",
-		"Vitalik_15",
-		"Vitalik_16",
-		"Vitalik_17",
 	}
 	StateSkipTests = []string{}
 	VmSkipTests    = []string{}
 )
+
+func init() {
+	// Quorum uses different gas limit parameter values as Ethereum.
+	// By overwriting these custom parameters to Ethereum values it's
+	// possible to use the test data from Ethereum.
+	params.MinGasLimit.SetString("5000", 10)
+	params.TargetGasLimit.SetString("4712388", 10)
+	params.GasLimitBoundDivisor.SetString("1024", 10)
+}
 
 func readJson(reader io.Reader, value interface{}) error {
 	data, err := ioutil.ReadAll(reader)
@@ -87,7 +94,11 @@ func readJsonHttp(uri string, value interface{}) error {
 	}
 	defer resp.Body.Close()
 
-	return readJson(resp.Body, value)
+	err = readJson(resp.Body, value)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func readJsonFile(fn string, value interface{}) error {

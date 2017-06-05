@@ -37,7 +37,6 @@ import (
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/p2p/discover"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/pow"
 	"github.com/ethereum/go-ethereum/rlp"
 )
@@ -68,8 +67,7 @@ type ProtocolManager struct {
 	txpool      txPool
 	blockchain  *core.BlockChain
 	chaindb     ethdb.Database
-	chainconfig *params.ChainConfig
-	maxPeers    int
+	chainconfig *core.ChainConfig
 
 	downloader *downloader.Downloader
 	fetcher    *fetcher.Fetcher
@@ -78,8 +76,8 @@ type ProtocolManager struct {
 	SubProtocols []p2p.Protocol
 
 	eventMux      *event.TypeMux
-	txSub         *event.TypeMuxSubscription
-	minedBlockSub *event.TypeMuxSubscription
+	txSub         event.Subscription
+	minedBlockSub event.Subscription
 
 	// channels for fetcher, syncer, txsyncLoop
 	newPeerCh   chan *peer
@@ -87,18 +85,18 @@ type ProtocolManager struct {
 	quitSync    chan struct{}
 	noMorePeers chan struct{}
 
-	lesServer LesServer
-
 	// wait group is used for graceful shutdowns during downloading
 	// and processing
 	wg sync.WaitGroup
 
 	badBlockReportingEnabled bool
+
+	raftMode bool
 }
 
 // NewProtocolManager returns a new ethereum sub protocol manager. The Ethereum sub protocol manages peers capable
 // with the ethereum network.
-func NewProtocolManager(config *params.ChainConfig, fastSync bool, networkId int, maxPeers int, mux *event.TypeMux, txpool txPool, pow pow.PoW, blockchain *core.BlockChain, chaindb ethdb.Database) (*ProtocolManager, error) {
+func NewProtocolManager(config *core.ChainConfig, singleMiner bool, networkId int, mux *event.TypeMux, txpool txPool, pow pow.PoW, blockchain *core.BlockChain, chaindb ethdb.Database, raftMode bool) (*ProtocolManager, error) {
 	// Create the protocol manager with the base fields
 	manager := &ProtocolManager{
 		networkId:   networkId,
@@ -107,28 +105,19 @@ func NewProtocolManager(config *params.ChainConfig, fastSync bool, networkId int
 		blockchain:  blockchain,
 		chaindb:     chaindb,
 		chainconfig: config,
-		maxPeers:    maxPeers,
 		peers:       newPeerSet(),
 		newPeerCh:   make(chan *peer),
 		noMorePeers: make(chan struct{}),
 		txsyncCh:    make(chan *txsync),
 		quitSync:    make(chan struct{}),
+		raftMode:    raftMode,
 	}
-	// Figure out whether to allow fast sync or not
-	if fastSync && blockchain.CurrentBlock().NumberU64() > 0 {
-		glog.V(logger.Info).Infof("blockchain not empty, fast sync disabled")
-		fastSync = false
-	}
-	if fastSync {
-		manager.fastSync = uint32(1)
+	if singleMiner {
+		manager.synced = uint32(1)
 	}
 	// Initiate a sub-protocol for every implemented version we can handle
 	manager.SubProtocols = make([]p2p.Protocol, 0, len(ProtocolVersions))
 	for i, version := range ProtocolVersions {
-		// Skip protocol version if incompatible with the mode of operation
-		if fastSync && version < eth63 {
-			continue
-		}
 		// Compatible; initialise the sub-protocol
 		version := version // Closure for the run
 		manager.SubProtocols = append(manager.SubProtocols, p2p.Protocol{
@@ -161,13 +150,13 @@ func NewProtocolManager(config *params.ChainConfig, fastSync bool, networkId int
 		return nil, errIncompatibleConfig
 	}
 	// Construct the different synchronisation mechanisms
-	manager.downloader = downloader.New(downloader.FullSync, chaindb, manager.eventMux, blockchain.HasHeader, blockchain.HasBlockAndState, blockchain.GetHeaderByHash,
+	manager.downloader = downloader.New(chaindb, manager.eventMux, blockchain.HasHeader, blockchain.HasBlockAndState, blockchain.GetHeaderByHash,
 		blockchain.GetBlockByHash, blockchain.CurrentHeader, blockchain.CurrentBlock, blockchain.CurrentFastBlock, blockchain.FastSyncCommitHead,
 		blockchain.GetTdByHash, blockchain.InsertHeaderChain, manager.insertChain, blockchain.InsertReceiptChain, blockchain.Rollback,
 		manager.removePeer)
 
 	validator := func(block *types.Block, parent *types.Block) error {
-		return core.ValidateHeader(config, pow, block.Header(), parent.Header(), true, false)
+		return core.ValidateHeader(chaindb, blockchain, config, block.Header(), parent.Header(), false, true)
 	}
 	heighter := func() uint64 {
 		return blockchain.CurrentBlock().NumberU64()
@@ -217,9 +206,17 @@ func (pm *ProtocolManager) Start() {
 	// broadcast transactions
 	pm.txSub = pm.eventMux.Subscribe(core.TxPreEvent{})
 	go pm.txBroadcastLoop()
-	// broadcast mined blocks
-	pm.minedBlockSub = pm.eventMux.Subscribe(core.NewMinedBlockEvent{})
-	go pm.minedBroadcastLoop()
+
+	if !pm.raftMode {
+		// broadcast mined blocks
+		pm.minedBlockSub = pm.eventMux.Subscribe(core.NewMinedBlockEvent{})
+		go pm.minedBroadcastLoop()
+	} else {
+		// We set this immediately in raft mode to make sure the miner never drops
+		// incoming txes. Raft mode doesn't use the fetcher or downloader, and so
+		// this would never be set otherwise.
+		atomic.StoreUint32(&pm.synced, 1)
+	}
 
 	// start sync handlers
 	go pm.syncer()
@@ -230,7 +227,9 @@ func (pm *ProtocolManager) Stop() {
 	glog.V(logger.Info).Infoln("Stopping ethereum protocol handler...")
 
 	pm.txSub.Unsubscribe()         // quits txBroadcastLoop
-	pm.minedBlockSub.Unsubscribe() // quits blockBroadcastLoop
+	if !pm.raftMode {
+		pm.minedBlockSub.Unsubscribe() // quits blockBroadcastLoop
+	}
 
 	// Quit the sync loop.
 	// After this send has completed, no new peers will be accepted.
@@ -258,10 +257,6 @@ func (pm *ProtocolManager) newPeer(pv int, p *p2p.Peer, rw p2p.MsgReadWriter) *p
 // handle is the callback invoked to manage the life cycle of an eth peer. When
 // this function terminates, the peer is disconnected.
 func (pm *ProtocolManager) handle(p *peer) error {
-	if pm.peers.Len() >= pm.maxPeers {
-		return p2p.DiscTooManyPeers
-	}
-
 	glog.V(logger.Debug).Infof("%v: peer connected [%s]", p, p.Name())
 
 	// Execute the Ethereum handshake
@@ -329,6 +324,13 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		return errResp(ErrMsgTooLarge, "%v > %v", msg.Size, ProtocolMaxMsgSize)
 	}
 	defer msg.Discard()
+
+	if pm.raftMode {
+		if msg.Code != TxMsg {
+			glog.V(logger.Debug).Infof("raft: ignoring non-TxMsg with code %v", msg.Code)
+			return nil
+		}
+	}
 
 	// Handle the message depending on its contents
 	switch {
@@ -607,16 +609,38 @@ func (pm *ProtocolManager) handleMsg(p *peer) error {
 		}
 
 	case msg.Code == NewBlockHashesMsg:
-		var announces newBlockHashesData
-		if err := msg.Decode(&announces); err != nil {
-			return errResp(ErrDecode, "%v: %v", msg, err)
+		// Retrieve and deserialize the remote new block hashes notification
+		type announce struct {
+			Hash   common.Hash
+			Number uint64
+		}
+		var announces = []announce{}
+
+		if p.version < eth62 {
+			// We're running the old protocol, make block number unknown (0)
+			var hashes []common.Hash
+			if err := msg.Decode(&hashes); err != nil {
+				return errResp(ErrDecode, "%v: %v", msg, err)
+			}
+			for _, hash := range hashes {
+				announces = append(announces, announce{hash, 0})
+			}
+		} else {
+			// Otherwise extract both block hash and number
+			var request newBlockHashesData
+			if err := msg.Decode(&request); err != nil {
+				return errResp(ErrDecode, "%v: %v", msg, err)
+			}
+			for _, block := range request {
+				announces = append(announces, announce{block.Hash, block.Number})
+			}
 		}
 		// Mark the hashes as present at the remote node
 		for _, block := range announces {
 			p.MarkBlock(block.Hash)
 		}
 		// Schedule all the unknown hashes for retrieval
-		unknown := make(newBlockHashesData, 0, len(announces))
+		unknown := make([]announce, 0, len(announces))
 		for _, block := range announces {
 			if !pm.blockchain.HasBlock(block.Hash) {
 				unknown = append(unknown, block)
@@ -750,7 +774,7 @@ func (self *ProtocolManager) txBroadcastLoop() {
 // EthNodeInfo represents a short summary of the Ethereum sub-protocol metadata known
 // about the host peer.
 type EthNodeInfo struct {
-	Network    int         `json:"network"`    // Ethereum network ID (1=Frontier, 2=Morden, Ropsten=3)
+	Network    int         `json:"network"`    // Ethereum network ID (0=Olympic, 1=Frontier, 2=Morden)
 	Difficulty *big.Int    `json:"difficulty"` // Total difficulty of the host's blockchain
 	Genesis    common.Hash `json:"genesis"`    // SHA3 hash of the host's genesis block
 	Head       common.Hash `json:"head"`       // SHA3 hash of the host's best owned block

@@ -32,8 +32,6 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
-	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/pow"
 	"github.com/hashicorp/golang-lru"
 )
 
@@ -49,7 +47,7 @@ const (
 // It is not thread safe either, the encapsulating chain structures should do
 // the necessary mutex locking/unlocking.
 type HeaderChain struct {
-	config *params.ChainConfig
+	config *ChainConfig
 
 	chainDb       ethdb.Database
 	genesisHeader *types.Header
@@ -74,7 +72,7 @@ type getHeaderValidatorFn func() HeaderValidator
 //  getValidator should return the parent's validator
 //  procInterrupt points to the parent's interrupt semaphore
 //  wg points to the parent's shutdown wait group
-func NewHeaderChain(chainDb ethdb.Database, config *params.ChainConfig, getValidator getHeaderValidatorFn, procInterrupt func() bool) (*HeaderChain, error) {
+func NewHeaderChain(chainDb ethdb.Database, config *ChainConfig, getValidator getHeaderValidatorFn, procInterrupt func() bool) (*HeaderChain, error) {
 	headerCache, _ := lru.New(headerCacheLimit)
 	tdCache, _ := lru.New(tdCacheLimit)
 	numberCache, _ := lru.New(numberCacheLimit)
@@ -221,34 +219,12 @@ type WhCallback func(*types.Header) error
 //
 // The verify parameter can be used to fine tune whether nonce verification
 // should be done or not. The reason behind the optional check is because some
-// of the header retrieval mechanisms already need to verfy nonces, as well as
+// of the header retrieval mechanisms already need to verify nonces, as well as
 // because nonces can be verified sparsely, not needing to check each.
 func (hc *HeaderChain) InsertHeaderChain(chain []*types.Header, checkFreq int, writeHeader WhCallback) (int, error) {
-	// Do a sanity check that the provided chain is actually ordered and linked
-	for i := 1; i < len(chain); i++ {
-		if chain[i].Number.Uint64() != chain[i-1].Number.Uint64()+1 || chain[i].ParentHash != chain[i-1].Hash() {
-			// Chain broke ancestry, log a messge (programming error) and skip insertion
-			failure := fmt.Errorf("non contiguous insert: item %d is #%d [%x…], item %d is #%d [%x…] (parent [%x…])",
-				i-1, chain[i-1].Number.Uint64(), chain[i-1].Hash().Bytes()[:4], i, chain[i].Number.Uint64(), chain[i].Hash().Bytes()[:4], chain[i].ParentHash.Bytes()[:4])
-
-			glog.V(logger.Error).Info(failure.Error())
-			return 0, failure
-		}
-	}
 	// Collect some import statistics to report on
 	stats := struct{ processed, ignored int }{}
 	start := time.Now()
-
-	// Generate the list of headers that should be POW verified
-	verify := make([]bool, len(chain))
-	for i := 0; i < len(verify)/checkFreq; i++ {
-		index := i*checkFreq + hc.rand.Intn(checkFreq)
-		if index >= len(verify) {
-			index = len(verify) - 1
-		}
-		verify[index] = true
-	}
-	verify[len(verify)-1] = true // Last should always be verified to avoid junk
 
 	// Create the header verification task queue and worker functions
 	tasks := make(chan int, len(chain))
@@ -278,14 +254,12 @@ func (hc *HeaderChain) InsertHeaderChain(chain []*types.Header, checkFreq int, w
 			if hc.HasHeader(hash) {
 				continue
 			}
-			// Verify that the header honors the chain parameters
-			checkPow := verify[index]
 
 			var err error
 			if index == 0 {
-				err = hc.getValidator().ValidateHeader(header, hc.GetHeader(header.ParentHash, header.Number.Uint64()-1), checkPow)
+				err = hc.getValidator().ValidateHeader(hc.chainDb, header, hc.GetHeader(header.ParentHash, header.Number.Uint64()-1))
 			} else {
-				err = hc.getValidator().ValidateHeader(header, chain[index-1], checkPow)
+				err = hc.getValidator().ValidateHeader(hc.chainDb, header, chain[index-1])
 			}
 			if err != nil {
 				errs[index] = err
@@ -339,7 +313,7 @@ func (hc *HeaderChain) InsertHeaderChain(chain []*types.Header, checkFreq int, w
 	if stats.ignored > 0 {
 		ignored = fmt.Sprintf(" (%d ignored)", stats.ignored)
 	}
-	glog.V(logger.Info).Infof("imported %4d headers%s in %9v. #%v [%x… / %x…]", stats.processed, ignored, common.PrettyDuration(time.Since(start)), last.Number, first.Hash().Bytes()[:4], last.Hash().Bytes()[:4])
+	glog.V(logger.Info).Infof("imported %d headers%s in %9v. #%v [%x… / %x…]", stats.processed, ignored, common.PrettyDuration(time.Since(start)), last.Number, first.Hash().Bytes()[:4], last.Hash().Bytes()[:4])
 
 	return 0, nil
 }
@@ -496,37 +470,4 @@ func (hc *HeaderChain) SetHead(head uint64, delFn DeleteCallback) {
 // SetGenesis sets a new genesis block header for the chain
 func (hc *HeaderChain) SetGenesis(head *types.Header) {
 	hc.genesisHeader = head
-}
-
-// headerValidator is responsible for validating block headers
-//
-// headerValidator implements HeaderValidator.
-type headerValidator struct {
-	config *params.ChainConfig
-	hc     *HeaderChain // Canonical header chain
-	Pow    pow.PoW      // Proof of work used for validating
-}
-
-// NewBlockValidator returns a new block validator which is safe for re-use
-func NewHeaderValidator(config *params.ChainConfig, chain *HeaderChain, pow pow.PoW) HeaderValidator {
-	return &headerValidator{
-		config: config,
-		Pow:    pow,
-		hc:     chain,
-	}
-}
-
-// ValidateHeader validates the given header and, depending on the pow arg,
-// checks the proof of work of the given header. Returns an error if the
-// validation failed.
-func (v *headerValidator) ValidateHeader(header, parent *types.Header, checkPow bool) error {
-	// Short circuit if the parent is missing.
-	if parent == nil {
-		return ParentError(header.ParentHash)
-	}
-	// Short circuit if the header's already known or its parent missing
-	if v.hc.HasHeader(header.Hash()) {
-		return nil
-	}
-	return ValidateHeader(v.config, v.Pow, header, parent, checkPow, false)
 }

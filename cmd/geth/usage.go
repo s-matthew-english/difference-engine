@@ -67,13 +67,10 @@ var AppHelpFlagGroups = []flagGroup{
 			utils.DataDirFlag,
 			utils.KeyStoreDirFlag,
 			utils.NetworkIdFlag,
+			utils.OlympicFlag,
 			utils.TestNetFlag,
 			utils.DevModeFlag,
 			utils.IdentityFlag,
-			utils.FastSyncFlag,
-			utils.LightModeFlag,
-			utils.LightServFlag,
-			utils.LightPeersFlag,
 			utils.LightKDFFlag,
 		},
 	},
@@ -82,6 +79,18 @@ var AppHelpFlagGroups = []flagGroup{
 		Flags: []cli.Flag{
 			utils.CacheFlag,
 			utils.TrieCacheGenFlag,
+		},
+	},
+	{
+		Name: "QUORUM",
+		Flags: []cli.Flag{
+			utils.VoteAccountFlag,
+			utils.VoteAccountPasswordFlag,
+			utils.VoteBlockMakerAccountFlag,
+			utils.VoteBlockMakerAccountPasswordFlag,
+			utils.SingleBlockMakerFlag,
+			utils.VoteMinBlockTimeFlag,
+			utils.VoteMaxBlockTimeFlag,
 		},
 	},
 	{
@@ -121,32 +130,8 @@ var AppHelpFlagGroups = []flagGroup{
 			utils.MaxPendingPeersFlag,
 			utils.NATFlag,
 			utils.NoDiscoverFlag,
-			utils.DiscoveryV5Flag,
 			utils.NodeKeyFileFlag,
 			utils.NodeKeyHexFlag,
-		},
-	},
-	{
-		Name: "MINER",
-		Flags: []cli.Flag{
-			utils.MiningEnabledFlag,
-			utils.MinerThreadsFlag,
-			utils.AutoDAGFlag,
-			utils.EtherbaseFlag,
-			utils.TargetGasLimitFlag,
-			utils.GasPriceFlag,
-			utils.ExtraDataFlag,
-		},
-	},
-	{
-		Name: "GAS PRICE ORACLE",
-		Flags: []cli.Flag{
-			utils.GpoMinGasPriceFlag,
-			utils.GpoMaxGasPriceFlag,
-			utils.GpoFullBlockRatioFlag,
-			utils.GpobaseStepDownFlag,
-			utils.GpobaseStepUpFlag,
-			utils.GpobaseCorrectionFactorFlag,
 		},
 	},
 	{
@@ -155,13 +140,11 @@ var AppHelpFlagGroups = []flagGroup{
 			utils.VMEnableJitFlag,
 			utils.VMForceJitFlag,
 			utils.VMJitCacheFlag,
-			utils.VMEnableDebugFlag,
 		},
 	},
 	{
 		Name: "LOGGING AND DEBUGGING",
 		Flags: append([]cli.Flag{
-			utils.EthStatsURLFlag,
 			utils.MetricsEnabledFlag,
 			utils.FakePoWFlag,
 		}, debug.Flags...),
@@ -170,6 +153,7 @@ var AppHelpFlagGroups = []flagGroup{
 		Name: "EXPERIMENTAL",
 		Flags: []cli.Flag{
 			utils.WhisperEnabledFlag,
+			utils.NatspecEnabledFlag,
 		},
 	},
 	{

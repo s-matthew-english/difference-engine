@@ -11,6 +11,7 @@
 #include "libsecp256k1-config.h"
 #endif
 
+#include <string.h>
 #include "util.h"
 #include "num.h"
 #include "field.h"
@@ -48,6 +49,10 @@ static void secp256k1_fe_verify(const secp256k1_fe *a) {
         }
     }
     VERIFY_CHECK(r == 1);
+}
+#else
+static void secp256k1_fe_verify(const secp256k1_fe *a) {
+    (void)a;
 }
 #endif
 

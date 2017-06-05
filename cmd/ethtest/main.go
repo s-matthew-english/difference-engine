@@ -76,11 +76,10 @@ func runTestWithReader(test string, r io.Reader) error {
 	case "bk", "block", "blocktest", "blockchaintest", "blocktests", "blockchaintests":
 		err = tests.RunBlockTestWithReader(params.MainNetHomesteadBlock, params.MainNetDAOForkBlock, params.MainNetHomesteadGasRepriceBlock, r, skipTests)
 	case "st", "state", "statetest", "statetests":
-		rs := &params.ChainConfig{HomesteadBlock: params.MainNetHomesteadBlock, DAOForkBlock: params.MainNetDAOForkBlock, DAOForkSupport: true, EIP150Block: params.MainNetHomesteadGasRepriceBlock}
+		rs := tests.RuleSet{HomesteadBlock: params.MainNetHomesteadBlock, DAOForkBlock: params.MainNetDAOForkBlock, DAOForkSupport: true}
 		err = tests.RunStateTestWithReader(rs, r, skipTests)
 	case "tx", "transactiontest", "transactiontests":
-		rs := &params.ChainConfig{HomesteadBlock: params.MainNetHomesteadBlock, DAOForkBlock: params.MainNetDAOForkBlock, DAOForkSupport: true, EIP150Block: params.MainNetHomesteadGasRepriceBlock}
-		err = tests.RunTransactionTestsWithReader(rs, r, skipTests)
+		err = tests.RunTransactionTestsWithReader(r, skipTests)
 	case "vm", "vmtest", "vmtests":
 		err = tests.RunVmTestWithReader(r, skipTests)
 	case "rlp", "rlptest", "rlptests":
@@ -88,7 +87,12 @@ func runTestWithReader(test string, r io.Reader) error {
 	default:
 		err = fmt.Errorf("Invalid test type specified: %v", test)
 	}
-	return err
+
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func getFiles(path string) ([]string, error) {

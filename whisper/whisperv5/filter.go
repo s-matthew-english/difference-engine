@@ -21,8 +21,6 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/logger"
-	"github.com/ethereum/go-ethereum/logger/glog"
 )
 
 type Filter struct {
@@ -39,20 +37,20 @@ type Filter struct {
 }
 
 type Filters struct {
-	id       uint32 // can contain any value except zero
-	watchers map[uint32]*Filter
+	id       int
+	watchers map[int]*Filter
 	whisper  *Whisper
 	mutex    sync.RWMutex
 }
 
 func NewFilters(w *Whisper) *Filters {
 	return &Filters{
-		watchers: make(map[uint32]*Filter),
+		watchers: make(map[int]*Filter),
 		whisper:  w,
 	}
 }
 
-func (fs *Filters) Install(watcher *Filter) uint32 {
+func (fs *Filters) Install(watcher *Filter) int {
 	if watcher.Messages == nil {
 		watcher.Messages = make(map[common.Hash]*ReceivedMessage)
 	}
@@ -60,44 +58,39 @@ func (fs *Filters) Install(watcher *Filter) uint32 {
 	fs.mutex.Lock()
 	defer fs.mutex.Unlock()
 
-	fs.id++
 	fs.watchers[fs.id] = watcher
-	return fs.id
+	ret := fs.id
+	fs.id++
+	return ret
 }
 
-func (fs *Filters) Uninstall(id uint32) {
+func (fs *Filters) Uninstall(id int) {
 	fs.mutex.Lock()
 	defer fs.mutex.Unlock()
 	delete(fs.watchers, id)
 }
 
-func (fs *Filters) Get(i uint32) *Filter {
+func (fs *Filters) Get(i int) *Filter {
 	fs.mutex.RLock()
 	defer fs.mutex.RUnlock()
 	return fs.watchers[i]
 }
 
-func (fs *Filters) NotifyWatchers(env *Envelope, p2pMessage bool) {
+func (fs *Filters) NotifyWatchers(env *Envelope, messageCode uint64) {
 	fs.mutex.RLock()
 	var msg *ReceivedMessage
-	for j, watcher := range fs.watchers {
-		if p2pMessage && !watcher.AcceptP2P {
-			glog.V(logger.Detail).Infof("msg [%x], filter [%d]: p2p messages are not allowed \n", env.Hash(), j)
+	for _, watcher := range fs.watchers {
+		if messageCode == p2pCode && !watcher.AcceptP2P {
 			continue
 		}
 
-		var match bool
+		match := false
 		if msg != nil {
 			match = watcher.MatchMessage(msg)
 		} else {
 			match = watcher.MatchEnvelope(env)
 			if match {
 				msg = env.Open(watcher)
-				if msg == nil {
-					glog.V(logger.Detail).Infof("msg [%x], filter [%d]: failed to open \n", env.Hash(), j)
-				}
-			} else {
-				glog.V(logger.Detail).Infof("msg [%x], filter [%d]: does not match \n", env.Hash(), j)
 			}
 		}
 
@@ -145,14 +138,23 @@ func (f *Filter) MatchMessage(msg *ReceivedMessage) bool {
 	if f.PoW > 0 && msg.PoW < f.PoW {
 		return false
 	}
-	if f.Src != nil && !IsPubKeyEqual(msg.Src, f.Src) {
+	if f.Src != nil && !isPubKeyEqual(msg.Src, f.Src) {
 		return false
 	}
 
 	if f.expectsAsymmetricEncryption() && msg.isAsymmetricEncryption() {
-		return IsPubKeyEqual(&f.KeyAsym.PublicKey, msg.Dst) && f.MatchTopic(msg.Topic)
+		// if Dst match, ignore the topic
+		return isPubKeyEqual(&f.KeyAsym.PublicKey, msg.Dst)
 	} else if f.expectsSymmetricEncryption() && msg.isSymmetricEncryption() {
-		return f.SymKeyHash == msg.SymKeyHash && f.MatchTopic(msg.Topic)
+		// check if that both the key and the topic match
+		if f.SymKeyHash == msg.SymKeyHash {
+			for _, t := range f.Topics {
+				if t == msg.Topic {
+					return true
+				}
+			}
+			return false
+		}
 	}
 	return false
 }
@@ -162,29 +164,29 @@ func (f *Filter) MatchEnvelope(envelope *Envelope) bool {
 		return false
 	}
 
+	encryptionMethodMatch := false
 	if f.expectsAsymmetricEncryption() && envelope.isAsymmetric() {
-		return f.MatchTopic(envelope.Topic)
-	} else if f.expectsSymmetricEncryption() && envelope.IsSymmetric() {
-		return f.MatchTopic(envelope.Topic)
-	}
-	return false
-}
-
-func (f *Filter) MatchTopic(topic TopicType) bool {
-	if len(f.Topics) == 0 {
-		// any topic matches
-		return true
-	}
-
-	for _, t := range f.Topics {
-		if t == topic {
+		encryptionMethodMatch = true
+		if f.Topics == nil {
+			// wildcard
 			return true
 		}
+	} else if f.expectsSymmetricEncryption() && envelope.IsSymmetric() {
+		encryptionMethodMatch = true
 	}
+
+	if encryptionMethodMatch {
+		for _, t := range f.Topics {
+			if t == envelope.Topic {
+				return true
+			}
+		}
+	}
+
 	return false
 }
 
-func IsPubKeyEqual(a, b *ecdsa.PublicKey) bool {
+func isPubKeyEqual(a, b *ecdsa.PublicKey) bool {
 	if !ValidatePublicKey(a) {
 		return false
 	} else if !ValidatePublicKey(b) {

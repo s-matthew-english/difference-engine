@@ -22,6 +22,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common/httpclient"
 )
 
 const port = "3222"
@@ -39,10 +41,10 @@ func TestRoundTripper(t *testing.T) {
 	go http.ListenAndServe(":"+port, serveMux)
 
 	rt := &RoundTripper{Port: port}
-	trans := &http.Transport{}
-	trans.RegisterProtocol("bzz", rt)
-	client := &http.Client{Transport: trans}
-	resp, err := client.Get("bzz://test.com/path")
+	client := httpclient.New("/")
+	client.RegisterProtocol("bzz", rt)
+
+	resp, err := client.Client().Get("bzz://test.com/path")
 	if err != nil {
 		t.Errorf("expected no error, got %v", err)
 		return

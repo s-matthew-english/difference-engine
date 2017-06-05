@@ -31,12 +31,10 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/logger/glog"
-	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -172,8 +170,10 @@ func runBlockTest(homesteadBlock, daoForkBlock, gasPriceFork *big.Int, test *Blo
 	core.WriteCanonicalHash(db, test.Genesis.Hash(), test.Genesis.NumberU64())
 	core.WriteHeadBlockHash(db, test.Genesis.Hash())
 	evmux := new(event.TypeMux)
-	config := &params.ChainConfig{HomesteadBlock: homesteadBlock, DAOForkBlock: daoForkBlock, DAOForkSupport: true, EIP150Block: gasPriceFork}
-	chain, err := core.NewBlockChain(db, config, ethash.NewShared(), evmux, vm.Config{})
+
+	config := &core.ChainConfig{HomesteadBlock: homesteadBlock, DAOForkBlock: daoForkBlock, DAOForkSupport: true, HomesteadGasRepriceBlock: gasPriceFork}
+	chain, err := core.NewBlockChain(db, config, ethash.NewShared(), evmux, false)
+
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func runBlockTest(homesteadBlock, daoForkBlock, gasPriceFork *big.Int, test *Blo
 		return fmt.Errorf("lastblockhash validation mismatch: want: %x, have: %x", lastblockhash, cmlast)
 	}
 
-	newDB, err := chain.State()
+	newDB, _, err := chain.State()
 	if err != nil {
 		return err
 	}
@@ -230,7 +230,7 @@ func (t *BlockTest) InsertPreState(db ethdb.Database) (*state.StateDB, error) {
 		}
 	}
 
-	root, err := statedb.Commit(false)
+	root, err := statedb.Commit()
 	if err != nil {
 		return nil, fmt.Errorf("error writing state: %v", err)
 	}
@@ -553,7 +553,9 @@ func LoadBlockTests(file string) (map[string]*BlockTest, error) {
 // Nothing to see here, please move along...
 func prepInt(base int, s string) string {
 	if base == 16 {
-		s = strings.TrimPrefix(s, "0x")
+		if strings.HasPrefix(s, "0x") {
+			s = s[2:]
+		}
 		if len(s) == 0 {
 			s = "00"
 		}

@@ -24,7 +24,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
@@ -39,7 +39,7 @@ type Receipt struct {
 	PostState         []byte
 	CumulativeGasUsed *big.Int
 	Bloom             Bloom
-	Logs              []*Log
+	Logs              vm.Logs
 
 	// Implementation fields (don't reorder!)
 	TxHash          common.Hash
@@ -49,12 +49,12 @@ type Receipt struct {
 
 type jsonReceipt struct {
 	PostState         *common.Hash    `json:"root"`
-	CumulativeGasUsed *hexutil.Big    `json:"cumulativeGasUsed"`
+	CumulativeGasUsed *hexBig         `json:"cumulativeGasUsed"`
 	Bloom             *Bloom          `json:"logsBloom"`
-	Logs              []*Log          `json:"logs"`
+	Logs              *vm.Logs        `json:"logs"`
 	TxHash            *common.Hash    `json:"transactionHash"`
 	ContractAddress   *common.Address `json:"contractAddress"`
-	GasUsed           *hexutil.Big    `json:"gasUsed"`
+	GasUsed           *hexBig         `json:"gasUsed"`
 }
 
 // NewReceipt creates a barebone transaction receipt, copying the init fields.
@@ -75,7 +75,7 @@ func (r *Receipt) DecodeRLP(s *rlp.Stream) error {
 		PostState         []byte
 		CumulativeGasUsed *big.Int
 		Bloom             Bloom
-		Logs              []*Log
+		Logs              vm.Logs
 	}
 	if err := s.Decode(&receipt); err != nil {
 		return err
@@ -90,12 +90,12 @@ func (r *Receipt) MarshalJSON() ([]byte, error) {
 
 	return json.Marshal(&jsonReceipt{
 		PostState:         &root,
-		CumulativeGasUsed: (*hexutil.Big)(r.CumulativeGasUsed),
+		CumulativeGasUsed: (*hexBig)(r.CumulativeGasUsed),
 		Bloom:             &r.Bloom,
-		Logs:              r.Logs,
+		Logs:              &r.Logs,
 		TxHash:            &r.TxHash,
 		ContractAddress:   &r.ContractAddress,
-		GasUsed:           (*hexutil.Big)(r.GasUsed),
+		GasUsed:           (*hexBig)(r.GasUsed),
 	})
 }
 
@@ -119,7 +119,7 @@ func (r *Receipt) UnmarshalJSON(input []byte) error {
 		PostState:         (*dec.PostState)[:],
 		CumulativeGasUsed: (*big.Int)(dec.CumulativeGasUsed),
 		Bloom:             *dec.Bloom,
-		Logs:              dec.Logs,
+		Logs:              *dec.Logs,
 		TxHash:            *dec.TxHash,
 		GasUsed:           (*big.Int)(dec.GasUsed),
 	}
@@ -141,9 +141,9 @@ type ReceiptForStorage Receipt
 // EncodeRLP implements rlp.Encoder, and flattens all content fields of a receipt
 // into an RLP stream.
 func (r *ReceiptForStorage) EncodeRLP(w io.Writer) error {
-	logs := make([]*LogForStorage, len(r.Logs))
+	logs := make([]*vm.LogForStorage, len(r.Logs))
 	for i, log := range r.Logs {
-		logs[i] = (*LogForStorage)(log)
+		logs[i] = (*vm.LogForStorage)(log)
 	}
 	return rlp.Encode(w, []interface{}{r.PostState, r.CumulativeGasUsed, r.Bloom, r.TxHash, r.ContractAddress, logs, r.GasUsed})
 }
@@ -157,7 +157,7 @@ func (r *ReceiptForStorage) DecodeRLP(s *rlp.Stream) error {
 		Bloom             Bloom
 		TxHash            common.Hash
 		ContractAddress   common.Address
-		Logs              []*LogForStorage
+		Logs              []*vm.LogForStorage
 		GasUsed           *big.Int
 	}
 	if err := s.Decode(&receipt); err != nil {
@@ -165,9 +165,9 @@ func (r *ReceiptForStorage) DecodeRLP(s *rlp.Stream) error {
 	}
 	// Assign the consensus fields
 	r.PostState, r.CumulativeGasUsed, r.Bloom = receipt.PostState, receipt.CumulativeGasUsed, receipt.Bloom
-	r.Logs = make([]*Log, len(receipt.Logs))
+	r.Logs = make(vm.Logs, len(receipt.Logs))
 	for i, log := range receipt.Logs {
-		r.Logs[i] = (*Log)(log)
+		r.Logs[i] = (*vm.Log)(log)
 	}
 	// Assign the implementation fields
 	r.TxHash, r.ContractAddress, r.GasUsed = receipt.TxHash, receipt.ContractAddress, receipt.GasUsed

@@ -56,11 +56,9 @@ func TestEmptyTrie(t *testing.T) {
 func TestNull(t *testing.T) {
 	var trie Trie
 	key := make([]byte, 32)
-	value := []byte("test")
+	value := common.FromHex("0x823140710bf13990e4500136726d8b55")
 	trie.Update(key, value)
-	if !bytes.Equal(trie.Get(key), value) {
-		t.Fatal("wrong value")
-	}
+	value = trie.Get(key)
 }
 
 func TestMissingRoot(t *testing.T) {

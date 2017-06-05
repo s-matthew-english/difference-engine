@@ -1,4 +1,4 @@
-// Copyright 2015 The go-ethereum Authors
+// Copyright 2016 The go-ethereum Authors
 // This file is part of the go-ethereum library.
 //
 // The go-ethereum library is free software: you can redistribute it and/or modify
@@ -21,7 +21,6 @@ import (
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/rlp"
@@ -44,11 +43,11 @@ type ContractBackend struct {
 
 // NewContractBackend creates a new native contract backend using an existing
 // Etheruem object.
-func NewContractBackend(apiBackend ethapi.Backend) *ContractBackend {
+func NewContractBackend(eth *Ethereum) *ContractBackend {
 	return &ContractBackend{
-		eapi:  ethapi.NewPublicEthereumAPI(apiBackend),
-		bcapi: ethapi.NewPublicBlockChainAPI(apiBackend),
-		txapi: ethapi.NewPublicTransactionPoolAPI(apiBackend),
+		eapi:  ethapi.NewPublicEthereumAPI(eth.apiBackend),
+		bcapi: ethapi.NewPublicBlockChainAPI(eth.apiBackend),
+		txapi: ethapi.NewPublicTransactionPoolAPI(eth.apiBackend),
 	}
 }
 
@@ -84,16 +83,16 @@ func toCallArgs(msg ethereum.CallMsg) ethapi.CallArgs {
 	args := ethapi.CallArgs{
 		To:   msg.To,
 		From: msg.From,
-		Data: msg.Data,
+		Data: common.ToHex(msg.Data),
 	}
 	if msg.Gas != nil {
-		args.Gas = hexutil.Big(*msg.Gas)
+		args.Gas = *rpc.NewHexNumber(msg.Gas)
 	}
 	if msg.GasPrice != nil {
-		args.GasPrice = hexutil.Big(*msg.GasPrice)
+		args.GasPrice = *rpc.NewHexNumber(msg.GasPrice)
 	}
 	if msg.Value != nil {
-		args.Value = hexutil.Big(*msg.Value)
+		args.Value = *rpc.NewHexNumber(msg.Value)
 	}
 	return args
 }
@@ -107,12 +106,9 @@ func toBlockNumber(num *big.Int) rpc.BlockNumber {
 
 // PendingAccountNonce implements bind.ContractTransactor retrieving the current
 // pending nonce associated with an account.
-func (b *ContractBackend) PendingNonceAt(ctx context.Context, account common.Address) (nonce uint64, err error) {
+func (b *ContractBackend) PendingNonceAt(ctx context.Context, account common.Address) (uint64, error) {
 	out, err := b.txapi.GetTransactionCount(ctx, account, rpc.PendingBlockNumber)
-	if out != nil {
-		nonce = uint64(*out)
-	}
-	return nonce, err
+	return out.Uint64(), err
 }
 
 // SuggestGasPrice implements bind.ContractTransactor retrieving the currently
@@ -128,13 +124,13 @@ func (b *ContractBackend) SuggestGasPrice(ctx context.Context) (*big.Int, error)
 // should provide a basis for setting a reasonable default.
 func (b *ContractBackend) EstimateGas(ctx context.Context, msg ethereum.CallMsg) (*big.Int, error) {
 	out, err := b.bcapi.EstimateGas(ctx, toCallArgs(msg))
-	return out.ToInt(), err
+	return out.BigInt(), err
 }
 
 // SendTransaction implements bind.ContractTransactor injects the transaction
 // into the pending pool for execution.
 func (b *ContractBackend) SendTransaction(ctx context.Context, tx *types.Transaction) error {
 	raw, _ := rlp.EncodeToBytes(tx)
-	_, err := b.txapi.SendRawTransaction(ctx, raw)
+	_, err := b.txapi.SendRawTransaction(ctx, common.ToHex(raw))
 	return err
 }

@@ -21,7 +21,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
@@ -77,12 +77,20 @@ func (b Bloom) TestBytes(test []byte) bool {
 
 // MarshalJSON encodes b as a hex string with 0x prefix.
 func (b Bloom) MarshalJSON() ([]byte, error) {
-	return hexutil.Bytes(b[:]).MarshalJSON()
+	return []byte(fmt.Sprintf(`"%#x"`, b[:])), nil
 }
 
 // UnmarshalJSON b as a hex string with 0x prefix.
 func (b *Bloom) UnmarshalJSON(input []byte) error {
-	return hexutil.UnmarshalJSON("Bloom", input, b[:])
+	var dec hexBytes
+	if err := dec.UnmarshalJSON(input); err != nil {
+		return err
+	}
+	if len(dec) != bloomLength {
+		return fmt.Errorf("invalid bloom size, want %d bytes", bloomLength)
+	}
+	copy((*b)[:], dec)
+	return nil
 }
 
 func CreateBloom(receipts Receipts) Bloom {
@@ -94,11 +102,17 @@ func CreateBloom(receipts Receipts) Bloom {
 	return BytesToBloom(bin.Bytes())
 }
 
-func LogsBloom(logs []*Log) *big.Int {
+func LogsBloom(logs vm.Logs) *big.Int {
 	bin := new(big.Int)
 	for _, log := range logs {
+		data := make([]common.Hash, len(log.Topics))
 		bin.Or(bin, bloom9(log.Address.Bytes()))
-		for _, b := range log.Topics {
+
+		for i, topic := range log.Topics {
+			data[i] = topic
+		}
+
+		for _, b := range data {
 			bin.Or(bin, bloom9(b[:]))
 		}
 	}

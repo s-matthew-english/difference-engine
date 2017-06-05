@@ -45,7 +45,7 @@ var (
 	// paths with any of these prefixes will be skipped
 	skipPrefixes = []string{
 		// boring stuff
-		"vendor/", "tests/files/", "build/",
+		"Godeps/", "tests/files/", "build/",
 		// don't relicense vendored sources
 		"crypto/sha3/", "crypto/ecies/", "logger/glog/",
 		"crypto/secp256k1/curve.go",
@@ -53,7 +53,6 @@ var (
 		"contracts/chequebook/contract/",
 		"contracts/ens/contract/",
 		"contracts/release/contract.go",
-		"p2p/discv5/nodeevent_string.go",
 	}
 
 	// paths with this prefix are licensed as GPL. all other files are LGPL.
@@ -185,7 +184,7 @@ func getFiles() []string {
 		files = append(files, line)
 	})
 	if err != nil {
-		log.Fatal("error getting files:", err)
+		log.Fatalf("error getting files:", err)
 	}
 	return files
 }
@@ -294,7 +293,7 @@ func getInfo(files <-chan string, out chan<- *info, wg *sync.WaitGroup) {
 	wg.Done()
 }
 
-// fileInfo finds the lowest year in which the given file was committed.
+// fileInfo finds the lowest year in which the given file was commited.
 func fileInfo(file string) (*info, error) {
 	info := &info{file: file, Year: int64(time.Now().Year())}
 	cmd := exec.Command("git", "log", "--follow", "--find-renames=80", "--find-copies=80", "--pretty=format:%ai", "--", file)

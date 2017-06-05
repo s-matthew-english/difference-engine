@@ -47,16 +47,15 @@ func ReadDiskStats(stats *DiskStats) error {
 			}
 			return err
 		}
-		parts := strings.Split(line, ":")
-		if len(parts) != 2 {
+		key, value := "", int64(0)
+		if parts := strings.Split(line, ":"); len(parts) != 2 {
 			continue
+		} else {
+			key = strings.TrimSpace(parts[0])
+			if value, err = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); err != nil {
+				return err
+			}
 		}
-		key := strings.TrimSpace(parts[0])
-		value, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
-		if err != nil {
-			return err
-		}
-
 		// Update the counter based on the key
 		switch key {
 		case "syscr":

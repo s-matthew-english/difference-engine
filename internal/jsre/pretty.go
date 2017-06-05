@@ -1,4 +1,4 @@
-// Copyright 2016 The go-ethereum Authors
+// Copyright 2015 The go-ethereum Authors
 // This file is part of the go-ethereum library.
 //
 // The go-ethereum library is free software: you can redistribute it and/or modify
@@ -73,10 +73,10 @@ func jsErrorString(err error) string {
 	return err.Error()
 }
 
-func (re *JSRE) prettyPrintJS(call otto.FunctionCall) otto.Value {
+func prettyPrintJS(call otto.FunctionCall, w io.Writer) otto.Value {
 	for _, v := range call.ArgumentList {
-		prettyPrint(call.Otto, v, re.output)
-		fmt.Fprintln(re.output)
+		prettyPrint(call.Otto, v, w)
+		fmt.Fprintln(w)
 	}
 	return otto.UndefinedValue()
 }

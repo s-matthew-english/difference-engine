@@ -80,7 +80,7 @@ func compactHexEncode(nibbles []byte) []byte {
 	}
 	l := (nl + 1) / 2
 	var str = make([]byte, l)
-	for i := range str {
+	for i, _ := range str {
 		b := nibbles[i*2] * 16
 		if nl > i*2 {
 			b += nibbles[i*2+1]
